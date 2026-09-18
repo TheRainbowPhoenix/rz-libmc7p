@@ -1,6 +1,12 @@
-# Rizin MC7 disassembler 
+# Rizin MC7+ disassembler 
 
-Library to disassemble MC7 bytecode for Siemens PLC SIMATIC S7-300 and S7-400
+Library to disassemble MC7+ bytecode for Siemens PLC SIMATIC S7-1200 and S7-1500
+
+**this is based on a MC7 disassembler. newer Siemens plc use a MC7+ bytecode similar to the old MC7, but have a jit VM transpiler in Adonis to make it much faster to run. the jit VM is still wip exploration, and this repo would be updated once major findings have been done. Please note that the MC7+ byte code vm, MC7+ compiler, MC7+ assembler, MC7+ linker ans SPS7-OMS+ byte code dumper are part of a separate repository**
+
+**if you have access to a real PLC (s7-1200 or 1500) and want to help dumping its content, if you have a bootloader of a new plc, or if you wish to help reversing more about Adonis, please open an issue in this repo**
+
+below is the original readme:
 
 **please report any bug. this is experimental for now**
 
