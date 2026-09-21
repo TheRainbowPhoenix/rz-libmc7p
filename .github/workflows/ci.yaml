@@ -8,10 +8,10 @@ on:
 
 jobs:
   Normal:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v6
     - name: Install meson and ninja
       run: pip3 install --user meson ninja
     - name: Run Unit Tests
@@ -21,10 +21,10 @@ jobs:
         ninja -C build test
 
   Asan:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v6
     - name: Install meson and ninja
       run: pip3 install --user meson ninja
     - name: Run Unit Tests with ASAN
