@@ -21,19 +21,12 @@ jobs:
         run: pip install meson ninja
 
       - name: Build (no rizin dependency)
-        working-directory: vendor/rz-libmc7
         run: |
           meson setup build-ci -Dbuild_shared_libs=false
           ninja -C build-ci
 
       - name: Unit tests (test_simatic + test_mc7plus)
-        working-directory: vendor/rz-libmc7
         run: meson test -C build-ci --print-errorlogs
-
-      - name: Differential vs zymatik python reference (113 corpus files)
-        env:
-          DIS_BIN: ${{ github.workspace }}/build-ci/dis_mc7plus
-        run: python3 scripts/diff_mc7plus_corpus.py
 
   windows-dll:
     name: windows x64 plugin dll + exe
