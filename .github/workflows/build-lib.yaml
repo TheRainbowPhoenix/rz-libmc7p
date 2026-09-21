@@ -28,6 +28,12 @@ jobs:
       - name: Unit tests (test_simatic + test_mc7plus)
         run: meson test -C build-ci --print-errorlogs
 
+      - name: Upload Linux build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci
+          path: build-ci/
+
   windows-dll:
     name: windows x64 plugin dll + exe
     runs-on: windows-latest
