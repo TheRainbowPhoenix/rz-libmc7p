@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [dev, main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux-tests:
+    name: tests + zymatik differential (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install meson + ninja
+        run: pip install meson ninja
+
+      - name: Build (no rizin dependency)
+        working-directory: vendor/rz-libmc7
+        run: |
+          meson setup build-ci -Dbuild_shared_libs=false
+          ninja -C build-ci
+
+      - name: Unit tests (test_simatic + test_mc7plus)
+        working-directory: vendor/rz-libmc7
+        run: meson test -C build-ci --print-errorlogs
+
+      - name: Differential vs zymatik python reference (113 corpus files)
+        env:
+          DIS_BIN: ${{ github.workspace }}/build-ci/dis_mc7plus
+        run: python3 scripts/diff_mc7plus_corpus.py
+
+  windows-dll:
+    name: windows x64 plugin dll + exe
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zig (cross compiler)
+        run: |
+          curl -sL -o zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-windows-0.14.1.tar.xz
+          tar xf zig.tar.xz
+          echo "$PWD/zig-x86_64-windows-0.14.1" >> "$GITHUB_PATH"
+
+      - name: Fetch official rizin Windows shared SDK (v0.9.1)
+        run: |
+          curl -sL -o rz-win.zip https://github.com/rizinorg/rizin/releases/download/v0.9.1/rizin-windows-shared64-v0.9.1.zip
+          unzip -q rz-win.zip
+          echo "RZ_WIN_SDK=$PWD/rizin-win-installer-clang_cl-64" >> "$GITHUB_ENV"
+
+      - name: Build rz_libmc7p.dll + libmc7_arch.dll + libmc7_bin.dll + dis_mc7plus.exe
+        run: sh scripts/build_win_plugin.sh dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rz-libmc7p-win64
+          path: dist/rz-libmc7p-win64/
