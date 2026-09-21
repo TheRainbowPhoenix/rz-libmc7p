@@ -2,7 +2,12 @@
 
 Library to disassemble MC7+ bytecode for Siemens PLC SIMATIC S7-1200 and S7-1500
 
-## MC7+ support (this fork / vendored copy)
+<img width="687" height="282" alt="image" src="https://github.com/user-attachments/assets/ab229bd8-8746-456a-903a-289e7b2ac63a" />
+
+<img width="1319" height="247" alt="image" src="https://github.com/user-attachments/assets/326a8e31-3f88-496e-ad24-84e8dbd50c4b" />
+
+
+## MC7+ support (this fork)
 
 The original plugin disassembles classic MC7 (S7-300/400 style wire, `pp`
 container).  This copy adds **MC7+**, the S7-1200/1500 bytecode executed by
