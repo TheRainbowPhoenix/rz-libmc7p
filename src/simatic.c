@@ -127,12 +127,12 @@ static inline const char *s7_mem_type(ut8_t T) {
 }
 
 static inline ut16_t s7_ut16(const ut8_t *buffer) {
-	return ((buffer[0] << 8) | buffer[1]);
+	return (ut16_t)(((ut16_t)buffer[0] << 8) | buffer[1]);
 }
 
 static inline ut32_t s7_ut32(const ut8_t *buffer) {
-	ut32_t x = ((buffer[0] << 24) | (buffer[1] << 16));
-	return x | ((buffer[2] << 8) | buffer[3]);
+	ut32_t x = (((ut32_t)buffer[0] << 24) | ((ut32_t)buffer[1] << 16));
+	return x | (((ut32_t)buffer[2] << 8) | buffer[3]);
 }
 
 static inline void s7_print_bin32(const char *prefix, const ut8_t *buffer, S7Instr *instr) {
