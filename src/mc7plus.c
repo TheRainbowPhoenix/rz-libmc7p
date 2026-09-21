@@ -1096,85 +1096,85 @@ static void restore_flags(const mc7p_op_t *op, const uint8_t *code,
  * disassemble_one): longest end wins, then higher flag-bit score, then
  * lowest op number (candidates iterate in ascending op order). */
 typedef struct {
-	int op;                     /* winning op number, -1 if none */
-	mc7p_access_t **ops;        /* arena-backed operand array */
-	int op_count;
-	int end;                    /* absolute end offset */
-	int flags[8];
-	int flag_count;
+        int op;                     /* winning op number, -1 if none */
+        mc7p_access_t **ops;        /* arena-backed operand array */
+        int op_count;
+        int end;                    /* absolute end offset */
+        int flags[8];
+        int flag_count;
 } best_t;
 
 static int decode_best_at(dctx_t *d, const uint8_t *code, size_t len,
-			  size_t pos, best_t *best) {
-	int slot_i;
-	int matched = 0;
-	int best_end = -1, best_score = -1;
-	memset(best, 0, sizeof(*best));
-	best->op = -1;
-	for (slot_i = 0; slot_i < g_first[code[pos]].count; slot_i++) {
-		int num = g_first[code[pos]].ops[slot_i];
-		const mc7p_op_t *op = &mc7p_ops[num];
-		reader_t r;
-		opl_t opl;
-		int end = 0, ok, bi;
-		uint32_t score = 0;
+                          size_t pos, best_t *best) {
+        int slot_i;
+        int matched = 0;
+        int best_end = -1, best_score = -1;
+        memset(best, 0, sizeof(*best));
+        best->op = -1;
+        for (slot_i = 0; slot_i < g_first[code[pos]].count; slot_i++) {
+                int num = g_first[code[pos]].ops[slot_i];
+                const mc7p_op_t *op = &mc7p_ops[num];
+                reader_t r;
+                opl_t opl;
+                int end = 0, ok, bi;
+                uint32_t score = 0;
 
-		if (op->code_len == 0 || pos + op->code_len > len) {
-			continue;
-		}
-		ok = 1;
-		for (bi = 0; bi < op->code_len; bi++) {
-			uint32_t mask = flag_mask_of(op, bi) |
-					coding_mask_of(op, bi);
-			if ((code[pos + bi] & ~mask & 0xFF) != op->code[bi]) {
-				ok = 0;
-				break;
-			}
-		}
-		if (!ok) {
-			continue;
-		}
-		memset(&r, 0, sizeof(r));
-		r.code = code;
-		r.len = len;
-		r.pos = pos + op->code_len;
-		memset(&opl, 0, sizeof(opl));
-		if (decode_params(d, op, &r, pos, &opl, &end) != 0) {
-			continue;
-		}
-		matched = 1;
-		{
-			int fi;
-			for (fi = 0; fi < op->param_count; fi++) {
-				const mc7p_param_t *p =
-					&mc7p_params[op->param_off + fi];
-				if (p->kind == MC7P_PARAM_FLAG) {
-					uint8_t bits = code[pos +
-						p->byte_pos] &
-						(1u << p->bit_pos);
-					while (bits) {
-						score += bits & 1u;
-						bits >>= 1;
-					}
-				}
-			}
-		}
-		if (end > best_end ||
-		    (end == best_end && (int)score > best_score)) {
-			int fv[8];
-			int fc = 0;
-			best_end = end;
-			best_score = (int)score;
-			best->op = num;
-			best->ops = opl.ops;
-			best->op_count = opl.count;
-			best->end = end;
-			restore_flags(op, code, pos, fv, &fc);
-			memcpy(best->flags, fv, sizeof(fv));
-			best->flag_count = fc;
-		}
-	}
-	return matched;
+                if (op->code_len == 0 || pos + op->code_len > len) {
+                        continue;
+                }
+                ok = 1;
+                for (bi = 0; bi < op->code_len; bi++) {
+                        uint32_t mask = flag_mask_of(op, bi) |
+                                        coding_mask_of(op, bi);
+                        if ((code[pos + bi] & ~mask & 0xFF) != op->code[bi]) {
+                                ok = 0;
+                                break;
+                        }
+                }
+                if (!ok) {
+                        continue;
+                }
+                memset(&r, 0, sizeof(r));
+                r.code = code;
+                r.len = len;
+                r.pos = pos + op->code_len;
+                memset(&opl, 0, sizeof(opl));
+                if (decode_params(d, op, &r, pos, &opl, &end) != 0) {
+                        continue;
+                }
+                matched = 1;
+                {
+                        int fi;
+                        for (fi = 0; fi < op->param_count; fi++) {
+                                const mc7p_param_t *p =
+                                        &mc7p_params[op->param_off + fi];
+                                if (p->kind == MC7P_PARAM_FLAG) {
+                                        uint8_t bits = code[pos +
+                                                p->byte_pos] &
+                                                (1u << p->bit_pos);
+                                        while (bits) {
+                                                score += bits & 1u;
+                                                bits >>= 1;
+                                        }
+                                }
+                        }
+                }
+                if (end > best_end ||
+                    (end == best_end && (int)score > best_score)) {
+                        int fv[8];
+                        int fc = 0;
+                        best_end = end;
+                        best_score = (int)score;
+                        best->op = num;
+                        best->ops = opl.ops;
+                        best->op_count = opl.count;
+                        best->end = end;
+                        restore_flags(op, code, pos, fv, &fc);
+                        memcpy(best->flags, fv, sizeof(fv));
+                        best->flag_count = fc;
+                }
+        }
+        return matched;
 }
 
 int mc7p_decode_code(const uint8_t *code, size_t len,
@@ -1440,8 +1440,8 @@ static void render_immediate(sb_t *s, const mc7p_access_t *a) {
         {
                 unsigned long long v = a->value;
                 long long signed_v = (v < (1ULL << 63)) ?
-					     (long long)v :
-					     -(long long)(~v) - 1;
+                                             (long long)v :
+                                             -(long long)(~v) - 1;
                 int t = a->data_type;
                 switch (t) {
                 case MC7P_OT_LINT:
@@ -1662,42 +1662,108 @@ const char *mc7p_op_name(int operation) {
 }
 
 int mc7p_disassemble_one(const uint8_t *code, size_t len, char *buf,
-			 size_t bufsize, int *is_return) {
-	dctx_t d;
-	best_t best;
-	int is_ret = 0;
+                         size_t bufsize, int *is_return) {
+        dctx_t d;
+        best_t best;
+        int is_ret = 0;
 
-	if (is_return) {
-		*is_return = 0;
-	}
-	if (len == 0) {
-		return -1;
-	}
-	build_first_index();
-	memset(&d, 0, sizeof(d));
-	if (decode_best_at(&d, code, len, 0, &best) && best.op >= 0) {
-		mc7p_stmt_t st;
-		memset(&st, 0, sizeof(st));
-		st.operation = best.op;
-		st.operands = best.ops;
-		st.operand_count = best.op_count;
-		memcpy(st.flags, best.flags, sizeof(best.flags));
-		st.flag_count = best.flag_count;
-		st.sac = 0;
-		st.bin_len = best.end;
-		if (mc7p_render_statement(&st, buf, bufsize) >= 0) {
-			const char *nm = mc7p_ops[best.op].name;
-			is_ret = nm && strncmp(nm, "RET", 3) == 0;
-		} else {
-			best.op = -1;
-		}
-	}
-	arena_free_all(&d.arena);
-	if (best.op < 0) {
-		return -1;
-	}
-	if (is_return && is_ret) {
-		*is_return = 1;
-	}
-	return best.end;
+        if (is_return) {
+                *is_return = 0;
+        }
+        if (len == 0) {
+                return -1;
+        }
+        build_first_index();
+        memset(&d, 0, sizeof(d));
+        if (decode_best_at(&d, code, len, 0, &best) && best.op >= 0) {
+                mc7p_stmt_t st;
+                memset(&st, 0, sizeof(st));
+                st.operation = best.op;
+                st.operands = best.ops;
+                st.operand_count = best.op_count;
+                memcpy(st.flags, best.flags, sizeof(best.flags));
+                st.flag_count = best.flag_count;
+                st.sac = 0;
+                st.bin_len = best.end;
+                if (mc7p_render_statement(&st, buf, bufsize) >= 0) {
+                        const char *nm = mc7p_ops[best.op].name;
+                        is_ret = nm && strncmp(nm, "RET", 3) == 0;
+                } else {
+                        best.op = -1;
+                }
+        }
+        arena_free_all(&d.arena);
+        if (best.op < 0) {
+                return -1;
+        }
+        if (is_return && is_ret) {
+                *is_return = 1;
+        }
+        return best.end;
+}
+
+int mc7p_flow_one(const uint8_t *code, size_t len, size_t off,
+                  mc7p_flow_t *out) {
+        dctx_t d;
+        best_t best;
+        const char *nm;
+        int flow_cond = 0;
+
+        if (out) {
+                out->kind = MC7P_FLOW_NONE;
+                out->label_id = -1;
+        }
+        if (len == 0 || off >= len) {
+                return -1;
+        }
+        build_first_index();
+        memset(&d, 0, sizeof(d));
+        if (!decode_best_at(&d, code, len, off, &best) || best.op < 0) {
+                arena_free_all(&d.arena);
+                return -1;
+        }
+        nm = mc7p_ops[best.op].name;
+        if (nm && strncmp(nm, "LABEL", 6) == 0) {
+                /* label marker: operand 0 carries the label id */
+                if (out && best.op_count > 0) {
+                        const mc7p_access_t *a = best.ops[0];
+                        if (a->kind == MC7P_ACC_IMMEDIATE && !a->is_real) {
+                                out->kind = MC7P_FLOW_LABEL;
+                                out->label_id = (long)a->value;
+                        }
+                }
+        } else if (nm && strncmp(nm, "JMP", 3) == 0) {
+                /* plain JMP: label in operand 0; every other JMP_* variant
+                 * carries the target label in the LAST operand (zymatik VM
+                 * reads o[-1]).  The wire COND flag marks conditional. */
+                int i;
+                const mc7p_access_t *a = NULL;
+                for (i = 0; i < best.flag_count; i++) {
+                        if (best.flags[i] == MC7P_FLAG_COND) {
+                                flow_cond = 1;
+                                break;
+                        }
+                }
+                if (best.op_count == 1) {
+                        a = best.ops[0];
+                } else if (best.op_count > 1) {
+                        a = best.ops[best.op_count - 1];
+                }
+                if (out) {
+                        out->kind = flow_cond ? MC7P_FLOW_CJMP : MC7P_FLOW_JMP;
+                        if (a && a->kind == MC7P_ACC_IMMEDIATE && !a->is_real) {
+                                out->label_id = (long)a->value;
+                        }
+                }
+        } else if (nm && strncmp(nm, "CALL", 4) == 0) {
+                if (out) {
+                        out->kind = MC7P_FLOW_CALL;
+                }
+        } else if (nm && strncmp(nm, "RET", 3) == 0) {
+                if (out) {
+                        out->kind = MC7P_FLOW_RET;
+                }
+        }
+        arena_free_all(&d.arena);
+        return best.end;
 }

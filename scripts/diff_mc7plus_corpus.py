@@ -10,6 +10,7 @@ For every raw MC7+ .bin under the zymatik corpus tree:
 Usage (from anywhere):  python3 vendor/rz-libmc7/scripts/diff_mc7plus_corpus.py
 Exits nonzero when any file mismatches.
 """
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,7 +23,7 @@ sys.path.insert(0, str(ZROOT))
 from zymatik.mc7plus.asm.disasm import decode_code           # noqa: E402
 from zymatik.mc7plus.asm.text import render_statements       # noqa: E402
 
-DIS = RZROOT / "build" / "dis_mc7plus"
+DIS = Path(os.environ.get("DIS_BIN", str(RZROOT / "build" / "dis_mc7plus")))
 
 
 def main() -> int:
