@@ -41,7 +41,12 @@ MOVE :Word @SL.Slot16.0 0
 
 ### Installing the plugin into a real rizin / Cutter
 
-Linux (plugin `.so` lands in the rizin plugdir reported by pkg-config):
+**Linux:** see [README_LINUX.md](README_LINUX.md) -- covers the CI artifact
+(`rz-libmc7p-linux64`) + `install.sh`, building from source, plugin search
+paths (`rizin -H RZ_USER_PLUGINS`), Cutter AppImage and troubleshooting.
+
+Quick commands (Linux, plugin `.so` lands in the rizin plugdir reported by
+pkg-config):
 
 ```
 PKG_CONFIG_PATH=<rizin prefix>/lib/x86_64-linux-gnu/pkgconfig \

@@ -1,36 +1,88 @@
-name: "Run tests"
+name: ci
 
 on:
   push:
-    branches:
-      - main
+    branches: [dev, main, master]
   pull_request:
+  workflow_dispatch:
 
 jobs:
-  Normal:
+  linux-tests:
+    name: tests + zymatik differential (linux)
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v6
-    - name: Install meson and ninja
-      run: pip3 install --user meson ninja
-    - name: Run Unit Tests
-      run: |
-        export PATH=${HOME}/Library/Python/3.8/bin:${HOME}/Library/Python/3.9/bin:${HOME}/.local/bin:${PATH}
-        meson -Dbuildtype=release -Dbuild_shared_libs=false build
-        ninja -C build test
+      - uses: actions/checkout@v6
 
-  Asan:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install meson + ninja
+        run: pip install meson ninja
+
+      - name: Build (no rizin dependency)
+        run: |
+          meson setup build-ci -Dbuild_shared_libs=false
+          ninja -C build-ci
+
+      - name: Unit tests (test_simatic + test_mc7plus)
+        run: meson test -C build-ci --print-errorlogs
+
+  linux-plugin:
+    name: linux x64 rizin plugin + cli
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v6
-    - name: Install meson and ninja
-      run: pip3 install --user meson ninja
-    - name: Run Unit Tests with ASAN
-      env:
-        ASAN_OPTIONS: detect_leaks=0,detect_odr_violation=0,allocator_may_return_null=1
-      run: |
-        export PATH=${HOME}/Library/Python/3.8/bin:${HOME}/Library/Python/3.9/bin:${HOME}/.local/bin:${PATH}
-        meson -Dbuildtype=debugoptimized -Dbuild_shared_libs=false -Db_sanitize=address,undefined build
-        ninja -C build test
+      - uses: actions/checkout@v6
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config
+          pip install meson ninja
+
+      - name: Build rizin v0.9.1 from source (plugin ABI reference)
+        run: |
+          git clone --depth 1 --branch v0.9.1 --recurse-submodules \
+            --shallow-submodules https://github.com/rizinorg/rizin.git
+          meson setup rzbuild rizin -Ddefault_library=shared --prefix=/usr/local
+          ninja -C rzbuild
+          sudo ninja -C rzbuild install
+          sudo ldconfig
+
+      - name: Build + package rz_libmc7p.so + libmc7_arch.so + libmc7_bin.so + dis_mc7plus
+        run: sh scripts/build_linux_plugin.sh dist
+
+      - name: Smoke-test the plugins inside real rizin
+        run: python3 scripts/smoke_rizin_plugin.py dist/rz-libmc7p-linux64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rz-libmc7p-linux64
+          path: dist/rz-libmc7p-linux64/
+
+  windows-dll:
+    name: windows x64 plugin dll + exe
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: mlugg/setup-zig@v2
+
+      - name: Fetch official rizin Windows shared SDK (v0.9.1)
+        run: |
+          curl -sL -o rz-win.zip https://github.com/rizinorg/rizin/releases/download/v0.9.1/rizin-windows-shared64-v0.9.1.zip
+          unzip -q rz-win.zip
+          echo "RZ_WIN_SDK=$PWD/rizin-win-installer-clang_cl-64" >> "$GITHUB_ENV"
+
+      - name: Build rz_libmc7p.dll + libmc7_arch.dll + libmc7_bin.dll + dis_mc7plus.exe
+        run: sh scripts/build_win_plugin.sh dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rz-libmc7p-win64
+          path: dist/rz-libmc7p-win64/
