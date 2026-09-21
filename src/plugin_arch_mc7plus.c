@@ -14,12 +14,18 @@
  * detected by the mc7 bin plugin).
  *
  * QoL features beyond raw text:
- *  - asm_toks: mnemonic + number tokens are handed to rizin so the GUI
- *    (Cutter included) colorizes the mnemonic by instruction type
- *    (jumps/branches/calls/rets/math...) and highlights numbers.
+ *  - asm_toks: FULL-coverage tokens (mnemonic, numbers, slot/memory
+ *    refs, type tags, flags) are handed to rizin.  With color enabled
+ *    rizin renders the text from the token spans only, so every byte
+ *    of the statement must be covered by a token; Cutter colorizes
+ *    mnemonics by instruction type (jumps/branches/calls/rets/math...)
+ *    and highlights slot references, numbers and type tags.
  *  - the analysis plugin classifies JMP/JMP_* (label targets), CALL_*
  *    and RET statements, resolving jump label ids to in-blob addresses
  *    so Cutter draws jump arrows for them.
+ *  - every LABEL statement is registered as a named function
+ *    ("LABEL<n>") so it shows up as a fcn-style marker and in the
+ *    function list.
  */
 #include <rz_arch.h>
 #include <rz_lib.h>
@@ -132,10 +138,68 @@ static void mc7p_push_tok(RzAsmTokenString *toks, size_t start, size_t len,
         rz_pvector_push(toks->tokens, t);
 }
 
-/* Tokenize the rendered statement for rizin's colorizer: the mnemonic
- * (colored by op type) and every decimal run (label ids, immediates;
- * matched against the highlight address).  Operands such as
- * @SL.Slot16.0 / [@PB.4 + 8] keep the default color. */
+static bool mc7p_is_ident_char(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '_' || c == '.';
+}
+
+static bool mc7p_is_word_char(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '_';
+}
+
+static bool mc7p_is_digit(char c) {
+        return c >= '0' && c <= '9';
+}
+
+/* Classify one identifier run (letters/digits/_/#/.).  Slot references
+ * (DB1.DBW2), hex / typed immediates (W#16#FF, T#100ms) and boolean
+ * literals (TRUE/FALSE) get a dedicated color; everything else keeps
+ * the default one.  Returns the offset just past the run. */
+static size_t mc7p_tok_ident(RzAsmTokenString *toks, const char *s,
+                             size_t n, size_t i) {
+        size_t j = i;
+        while (j < n && (mc7p_is_word_char(s[j]) || s[j] == '#')) {
+                j++;
+        }
+        /* dotted memory refs like DB5.DBW2 / DBR1.DBX3.1 */
+        while (j < n && s[j] == '.' && j + 1 < n && mc7p_is_word_char(s[j + 1])) {
+                j++;
+                while (j < n && (mc7p_is_word_char(s[j]) || s[j] == '#')) {
+                        j++;
+                }
+        }
+        RzAsmTokenType type = RZ_ASM_TOKEN_UNKNOWN;
+        ut64 num = 0;
+        if (memchr(s + i, '#', j - i)) {
+                type = RZ_ASM_TOKEN_NUMBER; /* W#16#FF, L#5, T#100ms, ... */
+        } else if (j > i + 1 && s[i] == 'D' && s[i + 1] == 'B' &&
+                   mc7p_is_digit(s[i + 2])) {
+                type = RZ_ASM_TOKEN_REGISTER; /* DB1.DBW2 family */
+        } else if (j - i == 4 && !strncmp(s + i, "TRUE", 4)) {
+                type = RZ_ASM_TOKEN_NUMBER;
+                num = 1;
+        } else if (j - i == 5 && !strncmp(s + i, "FALSE", 5)) {
+                type = RZ_ASM_TOKEN_NUMBER;
+                num = 0;
+        }
+        mc7p_push_tok(toks, i, j - i, type, num);
+        return j;
+}
+
+/* Tokenize the rendered statement for rizin's colorizer.
+ *
+ * IMPORTANT: when asm_toks is present rizin renders the disasm text
+ * from the token spans ONLY (rz_print_colorize_asm_str walks the token
+ * list and drops everything between spans), so the tokens must cover
+ * the whole string to reproduce the text byte-for-byte.  Span types:
+ *   - mnemonic (first word)                  -> MNEMONIC (op-type color)
+ *   - :Type tags and {FLAG,...} groups       -> META
+ *   - @SL.Slot16.0 / @PSYS.1 / %IW0 / DB refs -> REGISTER
+ *   - numeric literals (sign, float, suffix) -> NUMBER
+ *   - string literals '...'                  -> META
+ *   - everything else (spaces, [], +, , ...) -> UNKNOWN (default color)
+ */
 static void mc7p_fill_toks(RzAsmOp *op, ut32 op_type) {
         const char *s = rz_asm_op_get_asm(op);
         RzAsmTokenString *toks;
@@ -150,22 +214,113 @@ static void mc7p_fill_toks(RzAsmOp *op, ut32 op_type) {
         }
         n = strlen(s);
         mlen = 0;
-        while (mlen < n && s[mlen] != ' ') {
+        while (mlen < n && s[mlen] != ' ' && s[mlen] != '{') {
                 mlen++;
         }
         if (mlen > 0) {
                 mc7p_push_tok(toks, 0, mlen, RZ_ASM_TOKEN_MNEMONIC, 0);
         }
-        for (i = mlen; i < n; i++) {
-                if (s[i] >= '0' && s[i] <= '9') {
-                        size_t j = i;
-                        ut64 v = 0;
-                        while (j < n && s[j] >= '0' && s[j] <= '9') {
-                                v = v * 10 + (ut64)(s[j] - '0');
+        i = mlen;
+        while (i < n) {
+                char c = s[i];
+                size_t j;
+                if (c == '@') {
+                        j = i + 1;
+                        while (j < n && mc7p_is_ident_char(s[j])) {
                                 j++;
                         }
+                        /* @SL.Slot16.0, @SB.Slot16.1, @PSYS.1, ... */
+                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_REGISTER, 0);
+                        i = j;
+                } else if (c == '%') {
+                        j = i + 1;
+                        while (j < n && mc7p_is_ident_char(s[j])) {
+                                j++;
+                        }
+                        /* %I0.0, %QW4, %MD8:DWord -- the trailing :Type
+                         * suffix is left for the ':' branch below */
+                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_REGISTER, 0);
+                        i = j;
+                } else if (c == ':') {
+                        j = i + 1;
+                        while (j < n && mc7p_is_word_char(s[j])) {
+                                j++;
+                        }
+                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_META, 0);
+                        i = j;
+                } else if (c == '=') {
+                        j = i + 1;
+                        while (j < n && mc7p_is_word_char(s[j])) {
+                                j++;
+                        }
+                        /* condition refs like =COND */
+                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_META, 0);
+                        i = j;
+                } else if (c == '{') {
+                        j = i + 1;
+                        while (j < n && s[j] != '}') {
+                                j++;
+                        }
+                        if (j < n) {
+                                j++;
+                        }
+                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_META, 0);
+                        i = j;
+                } else if (c == '\'') {
+                        j = i + 1;
+                        while (j < n && s[j] != '\'') {
+                                j++;
+                        }
+                        if (j < n) {
+                                j++;
+                        }
+                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_META, 0);
+                        i = j;
+                } else if (mc7p_is_digit(c) ||
+                           ((c == '-' || c == '+' || c == '.') &&
+                            i + 1 < n && mc7p_is_digit(s[i + 1]))) {
+                        /* numeric literal: sign, digits, optional .frac,
+                         * optional exponent, optional L suffix (2.0L) */
+                        size_t k = i;
+                        ut64 v = 0;
+                        if (s[k] == '-' || s[k] == '+') {
+                                k++;
+                        }
+                        while (k < n && mc7p_is_digit(s[k])) {
+                                v = v * 10 + (ut64)(s[k] - '0');
+                                k++;
+                        }
+                        j = k;
+                        if (j < n && s[j] == '.') {
+                                j++;
+                                while (j < n && mc7p_is_digit(s[j])) {
+                                        j++;
+                                }
+                        }
+                        if (j < n && (s[j] == 'e' || s[j] == 'E')) {
+                                size_t k2 = j + 1;
+                                if (k2 < n && (s[k2] == '+' || s[k2] == '-')) {
+                                        k2++;
+                                }
+                                if (k2 < n && mc7p_is_digit(s[k2])) {
+                                        j = k2;
+                                        while (j < n && mc7p_is_digit(s[j])) {
+                                                j++;
+                                        }
+                                }
+                        }
+                        if (j < n && s[j] == 'L') {
+                                j++; /* LReal suffix */
+                        }
                         mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_NUMBER, v);
-                        i = j - 1;
+                        i = j;
+                } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                           c == '_') {
+                        i = mc7p_tok_ident(toks, s, n, i);
+                } else {
+                        /* separators: spaces, brackets, commas, ... */
+                        mc7p_push_tok(toks, i, 1, RZ_ASM_TOKEN_UNKNOWN, 0);
+                        i++;
                 }
         }
         toks->op_type = op_type;
@@ -249,6 +404,34 @@ static int analysis_op_mc7plus(RzAnalysis *analysis, RzAnalysisOp *op,
         mc7p_base_name(asm_buf, name, sizeof(name));
         op->type = mc7p_op_type(&flow, name);
         switch (flow.kind) {
+        case MC7P_FLOW_LABEL: {
+                /* A LABEL statement marks the entry of a labeled code
+                 * block.  Register it as a named function ("LABEL<n>")
+                 * so rizin/Cutter render a fcn-style marker line, the
+                 * label appears in the function list, and the arrows
+                 * from JMP/JMP_* statements land on a named location.
+                 * Jump-target labels may live before or after the
+                 * jumping statement, so do this right here while the
+                 * linear sweep passes over the blob. */
+                if (analysis && !rz_analysis_get_function_at(analysis, addr)) {
+                        char lname[40];
+                        snprintf(lname, sizeof(lname), "LABEL%ld",
+                                 flow.label_id);
+                        if (!rz_analysis_create_function(analysis, lname,
+                                                         addr,
+                                                         RZ_ANALYSIS_FCN_TYPE_FCN)) {
+                                /* same label id in another block blob:
+                                 * disambiguate with the address */
+                                snprintf(lname, sizeof(lname),
+                                         "LABEL%ld_%" PFMT64x,
+                                         flow.label_id, addr);
+                                rz_analysis_create_function(analysis, lname,
+                                                            addr,
+                                                            RZ_ANALYSIS_FCN_TYPE_FCN);
+                        }
+                }
+                break;
+        }
         case MC7P_FLOW_JMP:
         case MC7P_FLOW_CJMP:
                 op->eob = true;
