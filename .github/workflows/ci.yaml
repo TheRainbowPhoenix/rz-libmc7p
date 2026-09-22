@@ -17,8 +17,14 @@ jobs:
         with:
           python-version: '3.x'
 
+      # meson from apt, NOT pip: pip would do a --user install into
+      # ~/.local, and any `sudo ninja install` step re-runs the meson
+      # recorded at setup time as root -- root cannot see the user's
+      # ~/.local site-packages -> ModuleNotFoundError: mesonbuild
       - name: Install meson + ninja
-        run: pip install meson ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build
 
       - name: Build (no rizin dependency)
         run: |
@@ -34,17 +40,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # meson from apt, NOT pip: `sudo ninja -C rzbuild install` re-runs
+      # the meson recorded at setup time as root; a pip --user meson in
+      # ~/.local is invisible to root -> ModuleNotFoundError: mesonbuild
       - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config
-          pip install meson ninja
+          sudo apt-get install -y build-essential pkg-config meson ninja-build
 
       - name: Build rizin v0.9.1 from source (plugin ABI reference)
+        # -Denable_tests/-Denable_rz_test=false skips rizin's own 2500+
+        # test binaries (test/integration/*, test/unit/*): we only need
+        # the SDK (headers + shared libs + the rizin binary)
         run: |
           git clone --depth 1 --branch v0.9.1 --recurse-submodules \
             --shallow-submodules https://github.com/rizinorg/rizin.git
-          meson setup rzbuild rizin -Ddefault_library=shared --prefix=/usr/local
+          meson setup rzbuild rizin -Ddefault_library=shared --prefix=/usr/local \
+            -Denable_tests=false -Denable_rz_test=false
           ninja -C rzbuild
           sudo ninja -C rzbuild install
           sudo ldconfig
