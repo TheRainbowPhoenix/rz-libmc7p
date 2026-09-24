@@ -11,5 +11,7 @@ rizin-win-installer-clang_cl-64/
 .zig-cache-global/
 .zig-cache-local/
 test_mc7plus_flow*.exe
+test_mc7plus_features.exe
 dis_mc7plus_flow.exe
 rizin-dev
+refs

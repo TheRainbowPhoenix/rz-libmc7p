@@ -1762,6 +1762,12 @@ int mc7p_flow_one(const uint8_t *code, size_t len, size_t off,
         } else if (nm && strncmp(nm, "CALL", 4) == 0) {
                 if (out) {
                         out->kind = MC7P_FLOW_CALL;
+                        if (best.op_count > 0) {
+                                const mc7p_access_t *a = best.ops[0];
+                                if (a->kind == MC7P_ACC_IMMEDIATE && !a->is_real) {
+                                        out->label_id = (long)a->value;
+                                }
+                        }
                 }
         } else if (nm && strncmp(nm, "RET", 3) == 0) {
                 if (out) {
