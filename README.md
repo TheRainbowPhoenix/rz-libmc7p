@@ -1,3 +1,8 @@
+<h1 align="center">
+  <img src="assets/logo.svg#gh-light-mode-only" width="144px"/><br/>
+  <img src="assets/logo.svg#gh-dark-mode-only" width="144px"/><br/>
+</h1>
+
 # Rizin MC7+ disassembler
 
 A Rizin/Cutter plugin for disassembling and assembling **MC7+ bytecode** used by Siemens SIMATIC S7-1200 and S7-1500 PLCs. It adds MC7+ alongside the original classic MC7 (S7-300/400) decoder.
