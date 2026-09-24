@@ -8,7 +8,7 @@ AddMul statement sequence) and checks that a real rizin process
   1. registers asm.arch=mc7plus,
   2. decodes operands fully (this catches token/decoder regressions like
      the "MOVE1600" dropout),
-  3. prints the LABEL<n>(); function markers,
+  3. materializes LABEL statements as mc7p.label.<n> flags during analysis,
   4. draws the JMP -> LABEL arrow (checked structurally, not by an exact
      byte match: rizin renders the gutter differently depending on
      scr.utf8 / scr.utf8.curvy / scr.color and locale, and with color on
@@ -59,7 +59,6 @@ EXPECTED = [
 DET_FLAGS = "e scr.utf8=true; e scr.utf8.curvy=false; e scr.color=0;"
 
 PD_LINE = re.compile(r"^\s*0x[0-9a-fA-F]+\s+(.+?)\s*$")
-MARKER_LINE = re.compile(r"^[A-Za-z0-9_.]+\s*\(\);\s*$")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # asm.lines arrow/box decorations pD puts in front of instruction lines.
 # Covers all three vline tables of rizin 0.9.1 (rz_vline_a / _u / _uc):
@@ -136,7 +135,6 @@ def main() -> int:
         return 1
 
     stmts = []
-    markers = []
     jmp_gutters = []
     tgt_gutters = []
     for line in r.stdout.splitlines():
@@ -149,8 +147,6 @@ def main() -> int:
                 jmp_gutters.append(gutter_of(line))
             elif m.group(1) == "LABEL 1":
                 tgt_gutters.append(gutter_of(line))
-        elif MARKER_LINE.match(stripped.strip()):
-            markers.append(stripped.strip())
 
     problems = []
     if stmts != EXPECTED:
@@ -159,8 +155,27 @@ def main() -> int:
             g = stmts[i] if i < len(stmts) else "<missing>"
             if e != g:
                 problems.append("  line %d: want %r got %r" % (i + 1, e, g))
-    if not any(m.startswith("LABEL0(") for m in markers):
-        problems.append("  no LABEL0(); function marker in pD output")
+    # LABELs used to be rendered as synthetic "LABEL0();" marker lines in
+    # pD output. The plugin now keeps LABEL as a real instruction and exposes
+    # the addressable names through analysis flags, which is what Cutter/rizin
+    # use for navigation.
+    fr = subprocess.run(
+        [rizin, "-q", "-n", "-a", "mc7plus", "-b", "32",
+         "-c", DET_FLAGS + " aaaa; fl~mc7p.label", str(blob)],
+        capture_output=True, text=True, env=plug_env,
+    )
+    if fr.returncode != 0:
+        problems.append("  label flag analysis command failed: %s" %
+                        fr.stderr.strip()[:160])
+    flags = set()
+    for line in fr.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2].startswith("mc7p.label."):
+            flags.add(parts[2])
+    if "mc7p.label.0" not in flags:
+        problems.append("  no mc7p.label.0 analysis flag")
+    if "mc7p.label.1" not in flags:
+        problems.append("  no mc7p.label.1 analysis flag")
     # structural arrow check: the LABEL 1 line's gutter must carry
     # corner+dashes+arrowhead (and the JMP 1 line the mirrored one)
     if not any(ARROW_TO_TARGET.search(g) for g in tgt_gutters):
@@ -196,7 +211,7 @@ def main() -> int:
         return 1
 
     print("[+] %d statements match the reference text" % len(EXPECTED))
-    print("[+] LABEL0();/LABEL1(); function markers present")
+    print("[+] mc7p.label.0/mc7p.label.1 analysis flags present")
     print("[+] JMP -> LABEL jump arrow rendered (structural check)")
     print("SMOKE OK (%s, plugins from %s)" % (Path(rizin).name, tmp))
     return 0
