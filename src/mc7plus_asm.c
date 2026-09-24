@@ -1,354 +1,41 @@
 // SPDX-License-Identifier: LGPL-3.0-only
-/*
- * MC7+ (S7-1200/1500) rizin arch plugin.
- *
- * Mirrors the classic-mc7 plugin pair (plugin_asm.c + plugin_analysis.c
- * wrapped by plugin_arch.c) but drives the MC7+ decoder (mc7plus.c).
- * Select in rizin with:
- *
- *     e asm.arch=mc7plus
- *
- * Classic MC7 stays available as asm.arch=mc7; the two dialects coexist.
- * Note: a raw code blob is ambiguous between the two ISAs -- pick the
- * arch explicitly (the 0x7070 'pp' container of classic MC7 blocks is
- * detected by the mc7 bin plugin).
- *
- * QoL features beyond raw text:
- *  - asm_toks: FULL-coverage tokens (mnemonic, numbers, slot/memory
- *    refs, type tags, flags) are handed to rizin.  With color enabled
- *    rizin renders the text from the token spans only, so every byte
- *    of the statement must be covered by a token; Cutter colorizes
- *    mnemonics by instruction type (jumps/branches/calls/rets/math...)
- *    and highlights slot references, numbers and type tags.
- *  - the analysis plugin classifies JMP/JMP_* (label targets), CALL_*
- *    and RET statements, resolving jump label ids to in-blob addresses
- *    so Cutter draws jump arrows for them.
- *  - LABEL statements are valid jump targets; JMP/JMP_* references to them
- *    split basic blocks inside the analyzed function.
+/* MC7+ standalone assembler -- C port of the focused native encoder used by
+ * the rizin plugin.  No rizin dependency: Cutter and tests call this same
+ * entry point through mc7p_assemble_one().
  */
-#include <rz_arch.h>
-#include <rz_lib.h>
-#include <rz_asm.h>
-#include <rz_analysis.h>
-#include <rz_types.h>
-#include <rz_vector.h>
-
+#include "mc7plus.h"
 #include <ctype.h>
 #include <limits.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
-#ifndef _WIN32
-#include <strings.h>
-#define _stricmp strcasecmp
-#define _strnicmp strncasecmp
-#endif
-
-#include "mc7plus.h"
-
-#define MC7P_ASM_BUF 256
-
-/* Maximum statements scanned when resolving a jump label target. */
-#define MC7P_LABEL_SCAN_MAX 4096
-
-/* Maximum mapped bytes scanned when resolving LABEL targets through rizin IO.
- * MC7+ code blobs in this plugin are normally compact FC/FB bodies; this keeps
- * analysis bounded while still covering long forward/backward arrows. */
-#define MC7P_LABEL_SCAN_BYTES (4 * 1024 * 1024)
-
-/* Enough bytes to decode any single MC7+ statement during label scans. */
-#define MC7P_LABEL_SCAN_WINDOW 64
+#include <string.h>
 
 #define MC7P_ASM_MAX_OPERANDS 32
 #define MC7P_ASM_MAX_BYTES 256
 
-/* ----------------------------------------------------- opcode semantics */
-
-/* Map a statement (flow class + rendered name) to the rizin analysis op
- * type.  The same mapping drives the mnemonic COLOR (asm_toks->op_type)
- * and the analysis semantics (arrows, block ends). */
-static ut32 mc7p_op_type(const mc7p_flow_t *flow, const char *name) {
-        switch (flow->kind) {
-        case MC7P_FLOW_JMP:
-                return RZ_ANALYSIS_OP_TYPE_JMP;
-        case MC7P_FLOW_CJMP:
-                return RZ_ANALYSIS_OP_TYPE_CJMP;
-        case MC7P_FLOW_CALL:
-                return RZ_ANALYSIS_OP_TYPE_UCALL; /* target is a block index */
-        case MC7P_FLOW_RET:
-                return RZ_ANALYSIS_OP_TYPE_RET;
-        case MC7P_FLOW_LABEL:
-                return RZ_ANALYSIS_OP_TYPE_NOP;
-        default:
-                break;
-        }
-        if (name) {
-                /* arithmetic / logic mnemonics -> matching palette colors */
-                if (!strncmp(name, "MOVE", 4)) {
-                        return RZ_ANALYSIS_OP_TYPE_MOV;
-                }
-                if (!strncmp(name, "ADD", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_ADD;
-                }
-                if (!strncmp(name, "SUB", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_SUB;
-                }
-                if (!strncmp(name, "MUL", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_MUL;
-                }
-                if (!strncmp(name, "DIV", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_DIV;
-                }
-                if (!strncmp(name, "MOD", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_MOD;
-                }
-                if (!strncmp(name, "AND", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_AND;
-                }
-                if (!strncmp(name, "OR", 2)) {
-                        return RZ_ANALYSIS_OP_TYPE_OR;
-                }
-                if (!strncmp(name, "XOR", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_XOR;
-                }
-                if (!strncmp(name, "NOT", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_NOT;
-                }
-                if (!strncmp(name, "NEG", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_NOT;
-                }
-                if (!strncmp(name, "CMP", 3) || strstr(name, "_CMP") ||
-                    !strncmp(name, "LD_CMP", 6)) {
-                        return RZ_ANALYSIS_OP_TYPE_CMP;
-                }
-                if (!strncmp(name, "CONVERT", 7) || !strncmp(name, "ROUND", 5) ||
-                    !strncmp(name, "TRUNC", 5) || !strncmp(name, "FLOOR", 5) ||
-                    !strncmp(name, "CEIL", 4)) {
-                        return RZ_ANALYSIS_OP_TYPE_CAST;
-                }
-                if (!strncmp(name, "NOP", 3)) {
-                        return RZ_ANALYSIS_OP_TYPE_NOP;
+static int mc7p_stricmp(const char *a, const char *b) {
+        while (*a && *b) {
+                int ca = toupper((unsigned char)*a++);
+                int cb = toupper((unsigned char)*b++);
+                if (ca != cb) {
+                        return ca - cb;
                 }
         }
-        return RZ_ANALYSIS_OP_TYPE_UNK;
+        return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
-/* Rendered name without the trailing "{FLAG,...}" suffix. */
-static void mc7p_base_name(const char *asm_str, char *out, size_t outlen) {
-        size_t i;
-        for (i = 0; asm_str[i] && asm_str[i] != ' ' && asm_str[i] != '{' &&
-                    i + 1 < outlen;
-             i++) {
-                out[i] = asm_str[i];
-        }
-        out[i] = 0;
-}
-
-/* --------------------------------------------------- asm token colorizing */
-
-static void mc7p_push_tok(RzAsmTokenString *toks, size_t start, size_t len,
-                          RzAsmTokenType type, ut64 num) {
-        RzAsmToken *t = RZ_NEW0(RzAsmToken);
-        if (!t) {
-                return;
-        }
-        t->start = start;
-        t->len = len;
-        t->type = type;
-        t->val.number = num;
-        rz_pvector_push(toks->tokens, t);
-}
-
-static bool mc7p_is_ident_char(char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9') || c == '_' || c == '.';
-}
-
-static bool mc7p_is_word_char(char c) {
-        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9') || c == '_';
-}
-
-static bool mc7p_is_digit(char c) {
-        return c >= '0' && c <= '9';
-}
-
-/* Classify one identifier run (letters/digits/_/#/.).  Slot references
- * (DB1.DBW2), hex / typed immediates (W#16#FF, T#100ms) and boolean
- * literals (TRUE/FALSE) get a dedicated color; everything else keeps
- * the default one.  Returns the offset just past the run. */
-static size_t mc7p_tok_ident(RzAsmTokenString *toks, const char *s,
-                             size_t n, size_t i) {
-        size_t j = i;
-        while (j < n && (mc7p_is_word_char(s[j]) || s[j] == '#')) {
-                j++;
-        }
-        /* dotted memory refs like DB5.DBW2 / DBR1.DBX3.1 */
-        while (j < n && s[j] == '.' && j + 1 < n && mc7p_is_word_char(s[j + 1])) {
-                j++;
-                while (j < n && (mc7p_is_word_char(s[j]) || s[j] == '#')) {
-                        j++;
+static int mc7p_strnicmp(const char *a, const char *b, size_t n) {
+        while (n-- && *a && *b) {
+                int ca = toupper((unsigned char)*a++);
+                int cb = toupper((unsigned char)*b++);
+                if (ca != cb) {
+                        return ca - cb;
                 }
         }
-        RzAsmTokenType type = RZ_ASM_TOKEN_UNKNOWN;
-        ut64 num = 0;
-        if (memchr(s + i, '#', j - i)) {
-                type = RZ_ASM_TOKEN_NUMBER; /* W#16#FF, L#5, T#100ms, ... */
-        } else if (j > i + 1 && s[i] == 'D' && s[i + 1] == 'B' &&
-                   mc7p_is_digit(s[i + 2])) {
-                type = RZ_ASM_TOKEN_REGISTER; /* DB1.DBW2 family */
-        } else if (j - i == 4 && !strncmp(s + i, "TRUE", 4)) {
-                type = RZ_ASM_TOKEN_NUMBER;
-                num = 1;
-        } else if (j - i == 5 && !strncmp(s + i, "FALSE", 5)) {
-                type = RZ_ASM_TOKEN_NUMBER;
-                num = 0;
-        }
-        mc7p_push_tok(toks, i, j - i, type, num);
-        return j;
+        return n == (size_t)-1 ? 0 : (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
-
-/* Tokenize the rendered statement for rizin's colorizer.
- *
- * IMPORTANT: when asm_toks is present rizin renders the disasm text
- * from the token spans ONLY (rz_print_colorize_asm_str walks the token
- * list and drops everything between spans), so the tokens must cover
- * the whole string to reproduce the text byte-for-byte.  Span types:
- *   - mnemonic (first word)                  -> MNEMONIC (op-type color)
- *   - :Type tags and {FLAG,...} groups       -> META
- *   - @SL.Slot16.0 / @PSYS.1 / %IW0 / DB refs -> REGISTER
- *   - numeric literals (sign, float, suffix) -> NUMBER
- *   - string literals '...'                  -> META
- *   - everything else (spaces, [], +, , ...) -> UNKNOWN (default color)
- */
-static void mc7p_fill_toks(RzAsmOp *op, ut32 op_type) {
-        const char *s = rz_asm_op_get_asm(op);
-        RzAsmTokenString *toks;
-        size_t i, n, mlen;
-
-        if (!s) {
-                return;
-        }
-        toks = rz_asm_token_string_new(s);
-        if (!toks) {
-                return;
-        }
-        n = strlen(s);
-        mlen = 0;
-        while (mlen < n && s[mlen] != ' ' && s[mlen] != '{') {
-                mlen++;
-        }
-        if (mlen > 0) {
-                mc7p_push_tok(toks, 0, mlen, RZ_ASM_TOKEN_MNEMONIC, 0);
-        }
-        i = mlen;
-        while (i < n) {
-                char c = s[i];
-                size_t j;
-                if (c == '@') {
-                        j = i + 1;
-                        while (j < n && mc7p_is_ident_char(s[j])) {
-                                j++;
-                        }
-                        /* @SL.Slot16.0, @SB.Slot16.1, @PSYS.1, ... */
-                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_REGISTER, 0);
-                        i = j;
-                } else if (c == '%') {
-                        j = i + 1;
-                        while (j < n && mc7p_is_ident_char(s[j])) {
-                                j++;
-                        }
-                        /* %I0.0, %QW4, %MD8:DWord -- the trailing :Type
-                         * suffix is left for the ':' branch below */
-                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_REGISTER, 0);
-                        i = j;
-                } else if (c == ':') {
-                        j = i + 1;
-                        while (j < n && mc7p_is_word_char(s[j])) {
-                                j++;
-                        }
-                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_META, 0);
-                        i = j;
-                } else if (c == '=') {
-                        j = i + 1;
-                        while (j < n && mc7p_is_word_char(s[j])) {
-                                j++;
-                        }
-                        /* condition refs like =COND */
-                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_META, 0);
-                        i = j;
-                } else if (c == '{') {
-                        j = i + 1;
-                        while (j < n && s[j] != '}') {
-                                j++;
-                        }
-                        if (j < n) {
-                                j++;
-                        }
-                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_META, 0);
-                        i = j;
-                } else if (c == '\'') {
-                        j = i + 1;
-                        while (j < n && s[j] != '\'') {
-                                j++;
-                        }
-                        if (j < n) {
-                                j++;
-                        }
-                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_META, 0);
-                        i = j;
-                } else if (mc7p_is_digit(c) ||
-                           ((c == '-' || c == '+' || c == '.') &&
-                            i + 1 < n && mc7p_is_digit(s[i + 1]))) {
-                        /* numeric literal: sign, digits, optional .frac,
-                         * optional exponent, optional L suffix (2.0L) */
-                        size_t k = i;
-                        ut64 v = 0;
-                        if (s[k] == '-' || s[k] == '+') {
-                                k++;
-                        }
-                        while (k < n && mc7p_is_digit(s[k])) {
-                                v = v * 10 + (ut64)(s[k] - '0');
-                                k++;
-                        }
-                        j = k;
-                        if (j < n && s[j] == '.') {
-                                j++;
-                                while (j < n && mc7p_is_digit(s[j])) {
-                                        j++;
-                                }
-                        }
-                        if (j < n && (s[j] == 'e' || s[j] == 'E')) {
-                                size_t k2 = j + 1;
-                                if (k2 < n && (s[k2] == '+' || s[k2] == '-')) {
-                                        k2++;
-                                }
-                                if (k2 < n && mc7p_is_digit(s[k2])) {
-                                        j = k2;
-                                        while (j < n && mc7p_is_digit(s[j])) {
-                                                j++;
-                                        }
-                                }
-                        }
-                        if (j < n && s[j] == 'L') {
-                                j++; /* LReal suffix */
-                        }
-                        mc7p_push_tok(toks, i, j - i, RZ_ASM_TOKEN_NUMBER, v);
-                        i = j;
-                } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                           c == '_') {
-                        i = mc7p_tok_ident(toks, s, n, i);
-                } else {
-                        /* separators: spaces, brackets, commas, ... */
-                        mc7p_push_tok(toks, i, 1, RZ_ASM_TOKEN_UNKNOWN, 0);
-                        i++;
-                }
-        }
-        toks->op_type = op_type;
-        op->asm_toks = toks;
-}
-
-/* ----------------------------------------------------------- assembler */
-
 static bool mc7p_parse_label_id(const char *s, unsigned long long *out) {
         char *end = NULL;
         unsigned long long v;
@@ -369,11 +56,11 @@ static bool mc7p_parse_label_id(const char *s, unsigned long long *out) {
         return true;
 }
 
-static int mc7p_encode_positive_immediate(ut8 *out, unsigned long long v) {
+static int mc7p_encode_positive_immediate(uint8_t *out, unsigned long long v) {
         int n = 0;
         int i;
         if (v <= 2) {
-                out[0] = (ut8)v;
+                out[0] = (uint8_t)v;
                 return 1;
         }
         for (i = 7; i >= 0; i--) {
@@ -385,9 +72,9 @@ static int mc7p_encode_positive_immediate(ut8 *out, unsigned long long v) {
         if (n <= 0 || n > 8) {
                 return -1;
         }
-        out[0] = 0x20 | (ut8)(n - 1);
+        out[0] = 0x20 | (uint8_t)(n - 1);
         for (i = 0; i < n; i++) {
-                out[1 + i] = (ut8)(v >> ((n - 1 - i) * 8));
+                out[1 + i] = (uint8_t)(v >> ((n - 1 - i) * 8));
         }
         return n + 1;
 }
@@ -431,7 +118,7 @@ static int mc7p_name_to_op(const char *name) {
 static int mc7p_type_by_name(const char *name) {
         int i;
         for (i = 0; i < MC7P_OT_NAME_COUNT; i++) {
-                if (mc7p_ot_names[i] && !_stricmp(mc7p_ot_names[i], name)) {
+                if (mc7p_ot_names[i] && !mc7p_stricmp(mc7p_ot_names[i], name)) {
                         return i;
                 }
         }
@@ -556,7 +243,7 @@ static bool mc7p_is_direct_bit_type(int type, unsigned long long off) {
                 type == MC7P_OT_VOID) && (off % 8) != 0;
 }
 
-static int mc7p_write_offset(ut8 *out, size_t cap, unsigned long long value) {
+static int mc7p_write_offset(uint8_t *out, size_t cap, unsigned long long value) {
         int n = 1;
         int i;
         while (n < 8 && (value >> (n * 8))) {
@@ -566,12 +253,12 @@ static int mc7p_write_offset(ut8 *out, size_t cap, unsigned long long value) {
                 return -1;
         }
         for (i = 0; i < n; i++) {
-                out[i] = (ut8)(value >> ((n - 1 - i) * 8));
+                out[i] = (uint8_t)(value >> ((n - 1 - i) * 8));
         }
         return n - 1;
 }
 
-static int mc7p_write_slot_no(ut8 *out, size_t cap, unsigned long long value,
+static int mc7p_write_slot_no(uint8_t *out, size_t cap, unsigned long long value,
                               int fraction) {
         static const unsigned long long maxv[8] = {
                 252ULL, 65532ULL, 16777212ULL, 4294967292ULL,
@@ -589,9 +276,30 @@ static int mc7p_write_slot_no(ut8 *out, size_t cap, unsigned long long value,
                 return -1;
         }
         for (int i = 0; i <= add; i++) {
-                out[i] = (ut8)(wire >> ((add - i) * 8));
+                out[i] = (uint8_t)(wire >> ((add - i) * 8));
         }
-        out[add] |= (ut8)(fraction & 3);
+        out[add] |= (uint8_t)(fraction & 3);
+        return add;
+}
+
+static int mc7p_write_ptr_no(uint8_t *out, size_t cap, unsigned long long value,
+                             int fraction) {
+        unsigned long long wire = value << 3;
+        int add;
+        if (wire <= 248) {
+                add = 0;
+        } else if (wire <= 65528) {
+                add = 1;
+        } else {
+                return -1;
+        }
+        if ((size_t)(add + 1) > cap) {
+                return -1;
+        }
+        for (int i = 0; i <= add; i++) {
+                out[i] = (uint8_t)(wire >> ((add - i) * 8));
+        }
+        out[add] |= (uint8_t)(fraction & 7);
         return add;
 }
 
@@ -611,11 +319,11 @@ static int mc7p_parse_width_type(char letter) {
 
 static int mc7p_parse_slot_type(const char *s) {
         int i;
-        if (!_stricmp(s, "BIT")) {
+        if (!mc7p_stricmp(s, "BIT")) {
                 return MC7P_RANGE_SLOTBIT;
         }
         for (i = 0; i < 8; i++) {
-                if (mc7p_range_names[i] && !_stricmp(s, mc7p_range_names[i])) {
+                if (mc7p_range_names[i] && !mc7p_stricmp(s, mc7p_range_names[i])) {
                         return i;
                 }
         }
@@ -650,6 +358,50 @@ static int mc7p_parse_operand(const char *tok, mc7p_access_t *a) {
         a->data_type = MC7P_OT_VOID;
         if (!tok || !*tok) {
                 return -1;
+        }
+        if (tok[0] == '[') {
+                char inner[256];
+                char *plus, *base, *off, *end;
+                size_t len = strlen(tok);
+                if (len < 3 || tok[len - 1] != ']' ||
+                    len - 2 >= sizeof(inner)) {
+                        return -1;
+                }
+                memcpy(inner, tok + 1, len - 2);
+                inner[len - 2] = 0;
+                plus = strchr(inner, '+');
+                if (!plus) {
+                        return -1;
+                }
+                *plus++ = 0;
+                base = inner;
+                off = plus;
+                while (*base && isspace((unsigned char)*base)) base++;
+                end = base + strlen(base);
+                while (end > base && isspace((unsigned char)end[-1])) *--end = 0;
+                while (*off && isspace((unsigned char)*off)) off++;
+                end = off + strlen(off);
+                while (end > off && isspace((unsigned char)end[-1])) *--end = 0;
+                a->base = (mc7p_access_t *)calloc(1, sizeof(mc7p_access_t));
+                a->offset_acc = (mc7p_access_t *)calloc(1, sizeof(mc7p_access_t));
+                if (!a->base || !a->offset_acc) {
+                        free(a->base);
+                        free(a->offset_acc);
+                        return -1;
+                }
+                if (mc7p_parse_operand(base, a->base) ||
+                    mc7p_parse_operand(off, a->offset_acc) ||
+                    a->base->kind != MC7P_ACC_POINTER ||
+                    (a->offset_acc->kind != MC7P_ACC_IMMEDIATE &&
+                     a->offset_acc->kind != MC7P_ACC_SLOT)) {
+                        free(a->base);
+                        free(a->offset_acc);
+                        memset(a, 0, sizeof(*a));
+                        return -1;
+                }
+                a->kind = MC7P_ACC_INDIRECT;
+                a->data_type = MC7P_OT_VOID;
+                return 0;
         }
         if (tok[0] == ':') {
                 int t = mc7p_type_by_name(tok + 1);
@@ -699,7 +451,7 @@ static int mc7p_parse_operand(const char *tok, mc7p_access_t *a) {
         }
         if (tok[0] == '@' && toupper((unsigned char)tok[1]) == 'P') {
                 unsigned long long num;
-                if (!_strnicmp(tok, "@PSYS.", 6)) {
+                if (!mc7p_strnicmp(tok, "@PSYS.", 6)) {
                         if (mc7p_parse_uint(tok + 6, &num)) {
                                 return -1;
                         }
@@ -759,7 +511,7 @@ static int mc7p_parse_operand(const char *tok, mc7p_access_t *a) {
                 a->data_type = type;
                 return 0;
         }
-        if (!_strnicmp(tok, "DB", 2)) {
+        if (!mc7p_strnicmp(tok, "DB", 2)) {
                 int range = MC7P_AREA_DATA;
                 const char *p = tok + 2;
                 const char *dbp = NULL;
@@ -816,10 +568,10 @@ static int mc7p_parse_operand(const char *tok, mc7p_access_t *a) {
                 a->data_type = width == 'X' ? MC7P_OT_BOOL : mc7p_parse_width_type(width);
                 return a->data_type < 0 ? -1 : 0;
         }
-        if (!_stricmp(tok, "TRUE") || !_stricmp(tok, "FALSE")) {
+        if (!mc7p_stricmp(tok, "TRUE") || !mc7p_stricmp(tok, "FALSE")) {
                 a->kind = MC7P_ACC_IMMEDIATE;
                 a->data_type = MC7P_OT_BOOL;
-                a->value = !_stricmp(tok, "TRUE") ? 1 : 0;
+                a->value = !mc7p_stricmp(tok, "TRUE") ? 1 : 0;
                 a->bool_value = (int)a->value;
                 return 0;
         }
@@ -839,6 +591,7 @@ static int mc7p_parse_operand(const char *tok, mc7p_access_t *a) {
 static int mc7p_split_operands(char *s, char **tokens, int max_tokens) {
         int n = 0;
         while (*s) {
+                int depth = 0;
                 while (*s && isspace((unsigned char)*s)) {
                         *s++ = 0;
                 }
@@ -849,14 +602,31 @@ static int mc7p_split_operands(char *s, char **tokens, int max_tokens) {
                         return -1;
                 }
                 tokens[n++] = s;
-                while (*s && !isspace((unsigned char)*s)) {
+                while (*s && (depth > 0 || !isspace((unsigned char)*s))) {
+                        if (*s == '[') {
+                                depth++;
+                        } else if (*s == ']' && depth > 0) {
+                                depth--;
+                        }
                         s++;
                 }
         }
         return n;
 }
 
-static int mc7p_encode_immediate_typed(ut8 *out, size_t cap,
+static void mc7p_free_operand_tree(mc7p_access_t *a) {
+        if (!a) {
+                return;
+        }
+        mc7p_free_operand_tree(a->base);
+        mc7p_free_operand_tree(a->offset_acc);
+        free(a->base);
+        free(a->offset_acc);
+        a->base = NULL;
+        a->offset_acc = NULL;
+}
+
+static int mc7p_encode_immediate_typed(uint8_t *out, size_t cap,
                                        const mc7p_access_t *a, int ref_type,
                                        int mode) {
         int type = a->data_type;
@@ -890,7 +660,7 @@ static int mc7p_encode_immediate_typed(ut8 *out, size_t cap,
         }
         if (v <= 2) {
                 if (cap < 1) return -1;
-                out[0] = (ut8)v;
+                out[0] = (uint8_t)v;
                 return 1;
         }
         if (minus_one &&
@@ -905,16 +675,16 @@ static int mc7p_encode_immediate_typed(ut8 *out, size_t cap,
         return mc7p_encode_positive_immediate(out, v);
 }
 
-static int mc7p_encode_type_access(ut8 *out, size_t cap, int type) {
+static int mc7p_encode_type_access(uint8_t *out, size_t cap, int type) {
         int wire = mc7p_type_to_wire(type);
         if (wire < 0 || cap < 1) {
                 return -1;
         }
-        out[0] = (ut8)wire;
+        out[0] = (uint8_t)wire;
         return 1;
 }
 
-static int mc7p_encode_memory(ut8 *out, size_t cap, const mc7p_access_t *a,
+static int mc7p_encode_memory(uint8_t *out, size_t cap, const mc7p_access_t *a,
                               bool force_address) {
         unsigned long long off = a->offset;
         bool direct_bit = mc7p_is_direct_bit_type(a->data_type, off);
@@ -931,12 +701,12 @@ static int mc7p_encode_memory(ut8 *out, size_t cap, const mc7p_access_t *a,
                     cap < 3) {
                         return -1;
                 }
-                out[1] = (ut8)area;
+                out[1] = (uint8_t)area;
                 L = mc7p_write_offset(out + 2, cap - 2, off);
                 if (L < 0) {
                         return -1;
                 }
-                out[0] = (direct_bit ? 0xa0 : 0xa4) | (ut8)L;
+                out[0] = (direct_bit ? 0xa0 : 0xa4) | (uint8_t)L;
                 return 2 + L + 1;
         } else {
                 int area = mc7p_area_direct_code(a->area);
@@ -949,12 +719,12 @@ static int mc7p_encode_memory(ut8 *out, size_t cap, const mc7p_access_t *a,
                         return -1;
                 }
                 out[0] = (direct_bit ? 0x60 : 0x80) |
-                         (ut8)((area << 2) & 0x1c) | (ut8)L;
+                         (uint8_t)((area << 2) & 0x1c) | (uint8_t)L;
                 return 1 + L + 1;
         }
 }
 
-static int mc7p_encode_native(ut8 *out, size_t cap, const mc7p_access_t *a) {
+static int mc7p_encode_native(uint8_t *out, size_t cap, const mc7p_access_t *a) {
         int loc, scope, L;
         if (a->kind == MC7P_ACC_POINTER &&
             a->scope == MC7P_SCOPE_NativeSystem) {
@@ -962,7 +732,7 @@ static int mc7p_encode_native(ut8 *out, size_t cap, const mc7p_access_t *a) {
                 if (!area || cap < 1) {
                         return -1;
                 }
-                out[0] = 0x08 | (ut8)area;
+                out[0] = 0x08 | (uint8_t)area;
                 return 1;
         }
         if (cap < 2) {
@@ -982,11 +752,11 @@ static int mc7p_encode_native(ut8 *out, size_t cap, const mc7p_access_t *a) {
         if (L < 0) {
                 return -1;
         }
-        out[0] = 0x40 | (ut8)((loc << 2) & 0x1c) | (ut8)L;
+        out[0] = 0x40 | (uint8_t)((loc << 2) & 0x1c) | (uint8_t)L;
         return 1 + L + 1;
 }
 
-static int mc7p_encode_db(ut8 *out, size_t cap, const mc7p_access_t *a) {
+static int mc7p_encode_db(uint8_t *out, size_t cap, const mc7p_access_t *a) {
         int range = -1, L, L2;
         unsigned long long off = a->offset;
         bool direct_bit = mc7p_is_direct_bit_type(a->data_type, off);
@@ -1008,7 +778,7 @@ static int mc7p_encode_db(ut8 *out, size_t cap, const mc7p_access_t *a) {
                 return -1;
         }
         if (off == 0 && !direct_bit) {
-                out[0] = 0xa8 | (ut8)L;
+                out[0] = 0xa8 | (uint8_t)L;
                 return 1 + L + 1;
         }
         L2 = mc7p_write_offset(out + 1 + L + 1, cap - (size_t)(1 + L + 1),
@@ -1016,8 +786,75 @@ static int mc7p_encode_db(ut8 *out, size_t cap, const mc7p_access_t *a) {
         if (L2 < 0) {
                 return -1;
         }
-        out[0] = (direct_bit ? 0xc0 : 0xd0) | (ut8)(L << 2) | (ut8)L2;
+        out[0] = (direct_bit ? 0xc0 : 0xd0) | (uint8_t)(L << 2) | (uint8_t)L2;
         return 1 + L + 1 + L2 + 1;
+}
+
+static int mc7p_encode_indirect(uint8_t *out, size_t cap,
+                                const mc7p_access_t *a, int ref_type) {
+        const mc7p_access_t *base = a->base;
+        const mc7p_access_t *off = a->offset_acc;
+        int access, L;
+        if (!base || !off || base->kind != MC7P_ACC_POINTER || cap < 2) {
+                return -1;
+        }
+        access = (base->scope == MC7P_SCOPE_NATIVEBLOCK) ? 1 : 0;
+        if (a->type_safe) {
+                access |= 4;
+        }
+        if (a->granted) {
+                access |= 2;
+        }
+        L = mc7p_write_ptr_no(out + 1, cap - 1,
+                              (unsigned long long)base->pointer_number,
+                              access);
+        if (L < 0) {
+                return -1;
+        }
+        if (off->kind == MC7P_ACC_SLOT) {
+                int scope = mc7p_scope_code(off->scope);
+                int L2;
+                if (scope < 0) {
+                        return -1;
+                }
+                L2 = mc7p_write_slot_no(out + 2 + L, cap - (size_t)(2 + L),
+                                        (unsigned long long)off->slot_number,
+                                        scope);
+                if (L2 < 0) {
+                        return -1;
+                }
+                out[0] = 0xe0 | (uint8_t)((L << 2) & 4) | (uint8_t)(L2 & 3);
+                return 2 + L + L2 + 1;
+        }
+        if (off->kind == MC7P_ACC_IMMEDIATE) {
+                unsigned long long value = off->value;
+                int type = (a->data_type != MC7P_OT_VOID &&
+                            a->data_type != MC7P_OT_UNDEF) ?
+                                   a->data_type : ref_type;
+                if (value == 0) {
+                        out[0] = 0xe8 | (uint8_t)((L << 2) & 4);
+                        return 2 + L;
+                } else {
+                        unsigned long long offset = value;
+                        bool direct_bit = mc7p_is_direct_bit_type(type, value);
+                        int L2;
+                        if (!direct_bit) {
+                                if (offset % 8) {
+                                        return -1;
+                                }
+                                offset /= 8;
+                        }
+                        L2 = mc7p_write_offset(out + 2 + L,
+                                               cap - (size_t)(2 + L), offset);
+                        if (L2 < 0) {
+                                return -1;
+                        }
+                        out[0] = (direct_bit ? 0xf0 : 0xf8) |
+                                 (uint8_t)((L << 2) & 4) | (uint8_t)(L2 & 3);
+                        return 2 + L + L2 + 1;
+                }
+        }
+        return -1;
 }
 
 static int mc7p_operand_ref_type(const mc7p_access_t *operands, int op_count,
@@ -1037,10 +874,12 @@ static int mc7p_operand_ref_type(const mc7p_access_t *operands, int op_count,
         return MC7P_OT_UNDEF;
 }
 
-static int mc7p_encode_operand(ut8 *out, size_t cap, const mc7p_access_t *a,
+static int mc7p_encode_operand(uint8_t *out, size_t cap, const mc7p_access_t *a,
                                const mc7p_param_t *p, int ref_type) {
         if (a->kind == MC7P_ACC_IMMEDIATE) {
-                int type = p->predefined_type >= 0 ? p->predefined_type : ref_type;
+                int type = (p->predefined_type >= 0 &&
+                            p->predefined_type != MC7P_OT_UNDEF) ?
+                                   p->predefined_type : ref_type;
                 return mc7p_encode_immediate_typed(out, cap, a, type, p->mode);
         }
         if (a->kind == MC7P_ACC_TYPE) {
@@ -1051,7 +890,7 @@ static int mc7p_encode_operand(ut8 *out, size_t cap, const mc7p_access_t *a,
                 if (c < 0 || cap < 1) {
                         return -1;
                 }
-                out[0] = (ut8)c;
+                out[0] = (uint8_t)c;
                 return 1;
         }
         if (a->kind == MC7P_ACC_SLOT || a->kind == MC7P_ACC_POINTER) {
@@ -1064,10 +903,13 @@ static int mc7p_encode_operand(ut8 *out, size_t cap, const mc7p_access_t *a,
         if (a->kind == MC7P_ACC_DBPI) {
                 return mc7p_encode_db(out, cap, a);
         }
+        if (a->kind == MC7P_ACC_INDIRECT) {
+                return mc7p_encode_indirect(out, cap, a, ref_type);
+        }
         return -1;
 }
 
-static int mc7p_assemble_table(const char *buf, ut8 *out, size_t cap) {
+static int mc7p_assemble_table(const char *buf, uint8_t *out, size_t cap) {
         char tmp[512];
         char mnemonic[80];
         char *flags = NULL, *rest, *tokens[MC7P_ASM_MAX_OPERANDS];
@@ -1141,7 +983,7 @@ static int mc7p_assemble_table(const char *buf, ut8 *out, size_t cap) {
                         for (int f = 0; f < flag_count; f++) {
                                 if (flag_values[f] == p->flag_type &&
                                     p->byte_pos < op->code_len) {
-                                        out[p->byte_pos] |= (ut8)(1u << p->bit_pos);
+                                        out[p->byte_pos] |= (uint8_t)(1u << p->bit_pos);
                                 }
                         }
                         continue;
@@ -1163,7 +1005,7 @@ static int mc7p_assemble_table(const char *buf, ut8 *out, size_t cap) {
                         if (by < 0) {
                                 return -1;
                         }
-                        out[p->byte_pos] |= (ut8)(by << p->bit_pos);
+                        out[p->byte_pos] |= (uint8_t)(by << p->bit_pos);
                         oi++;
                         continue;
                 }
@@ -1191,7 +1033,7 @@ static int mc7p_assemble_table(const char *buf, ut8 *out, size_t cap) {
                         if (c < 0 || (size_t)ti >= cap) {
                                 return -1;
                         }
-                        out[ti++] = (ut8)c;
+                        out[ti++] = (uint8_t)c;
                         oi++;
                 } else if (p->kind == MC7P_PARAM_IDENT) {
                         int ref_type = p->ref_type >= 0 ?
@@ -1280,17 +1122,17 @@ static bool mc7p_flag_present(const int *flags, int flag_count, int flag) {
         return false;
 }
 
-static int mc7p_encode_ident_ref(ut8 *out, size_t cap, const mc7p_access_t *a,
+static int mc7p_encode_ident_ref(uint8_t *out, size_t cap, const mc7p_access_t *a,
                                  int ref_type, int mode) {
         mc7p_param_t p;
         memset(&p, 0, sizeof(p));
         p.kind = MC7P_PARAM_IDENT;
         p.predefined_type = MC7P_OT_UNDEF;
-        p.mode = (ut8)mode;
+        p.mode = (uint8_t)mode;
         return mc7p_encode_operand(out, cap, a, &p, ref_type);
 }
 
-static int mc7p_assemble_selected(const char *buf, ut8 *out, size_t cap) {
+static int mc7p_assemble_selected(const char *buf, uint8_t *out, size_t cap) {
         char mnemonic[80];
         int flags[8], flag_count = 0, operand_count = 0;
         mc7p_access_t operands[MC7P_ASM_MAX_OPERANDS];
@@ -1331,7 +1173,7 @@ static int mc7p_assemble_selected(const char *buf, ut8 *out, size_t cap) {
             !strcmp(mnemonic, "MUL") || !strcmp(mnemonic, "DIV") ||
             !strcmp(mnemonic, "MOD") || !strcmp(mnemonic, "AND") ||
             !strcmp(mnemonic, "OR") || !strcmp(mnemonic, "XOR")) {
-                static const struct { const char *name; ut8 code; } ops[] = {
+                static const struct { const char *name; uint8_t code; } ops[] = {
                         { "ADD", 0x20 }, { "SUB", 0x21 }, { "MUL", 0x22 },
                         { "DIV", 0x23 }, { "MOD", 0x24 }, { "AND", 0x28 },
                         { "OR", 0x29 }, { "XOR", 0x2a },
@@ -1382,7 +1224,7 @@ static int mc7p_assemble_selected(const char *buf, ut8 *out, size_t cap) {
                 }
                 c = mc7p_cond_to_wire(operands[0].cond_val);
                 if (c < 0) return -1;
-                out[pos++] = (ut8)c;
+                out[pos++] = (uint8_t)c;
                 n = mc7p_encode_type_access(out + pos, cap - (size_t)pos,
                                             operands[1].data_type);
                 if (n < 0) return -1;
@@ -1400,329 +1242,104 @@ static int mc7p_assemble_selected(const char *buf, ut8 *out, size_t cap) {
         return -1;
 }
 
-static int assemble_mc7plus(const RzAsm *a, RzAsmOp *op, const char *buf) {
-        ut8 out[MC7P_ASM_MAX_BYTES];
-        int len = mc7p_assemble_one(buf, out, sizeof(out));
-        if (len <= 0) {
+int mc7p_assemble_one(const char *buf, uint8_t *out, size_t out_cap) {
+        uint8_t small[16];
+        char word[64];
+        const char *p = buf;
+        size_t wlen = 0;
+        int table_len;
+
+        if (!buf || !out || out_cap == 0) {
                 return -1;
         }
-        rz_asm_op_set_buf(op, out, len);
-        return len;
-}
+        table_len = mc7p_assemble_selected(buf, out, out_cap);
+        if (table_len < 0) {
+                table_len = mc7p_assemble_table(buf, out, out_cap);
+        }
+        if (table_len > 0) {
+                return table_len;
+        }
 
-static char *mc7p_mnemonics(const RzAsm *a, int id, bool json) {
-        RzStrBuf *buf;
-        int i;
-        if (id >= 0 && id < MC7P_OP_COUNT && mc7p_ops[id].name) {
-                return json ? rz_str_newf("[\"%s\"]\n", mc7p_ops[id].name) :
-                              rz_str_dup(mc7p_ops[id].name);
+        while (*p && isspace((unsigned char)*p)) {
+                p++;
         }
-        if (id != -1) {
-                return NULL;
+        while (p[wlen] && !isspace((unsigned char)p[wlen]) && wlen + 1 < sizeof(word)) {
+                word[wlen] = (char)toupper((unsigned char)p[wlen]);
+                wlen++;
         }
-        buf = rz_strbuf_new("");
-        if (!buf) {
-                return NULL;
-        }
-        if (json) {
-                rz_strbuf_append(buf, "[");
-        }
-        for (i = 0; i < MC7P_OP_COUNT; i++) {
-                const char *name = mc7p_ops[i].name;
-                if (!name) {
-                        continue;
-                }
-                if (json) {
-                        if (rz_strbuf_length(buf) > 1) {
-                                rz_strbuf_append(buf, ",");
-                        }
-                        rz_strbuf_appendf(buf, "\"%s\"", name);
-                } else {
-                        rz_strbuf_appendf(buf, "%s\n", name);
-                }
-        }
-        if (json) {
-                rz_strbuf_append(buf, "]\n");
-        }
-        return rz_strbuf_drain(buf);
-}
+        word[wlen] = 0;
+        p += wlen;
 
-static int disassemble_mc7plus(const RzAsm *a, RzAsmOp *op, const ut8 *buf,
-                               int len) {
-        char asm_buf[MC7P_ASM_BUF];
-        char name[48];
-        mc7p_flow_t flow;
-        ut32 op_type;
-        int read = mc7p_disassemble_one(buf, (size_t)len, asm_buf,
-                                        sizeof(asm_buf), NULL);
-        if (read < 0) {
-                rz_asm_op_set_asm(op, "invalid");
-                op->size = 1;
-                return op->size;
+        if (!strcmp(word, "NOP")) {
+                if (out_cap < 1) return -1;
+                out[0] = 0x00;
+                return 1;
         }
-        rz_asm_op_set_asm(op, asm_buf);
-        op->size = read;
-        if (mc7p_flow_one(buf, (size_t)len, 0, &flow) >= 0) {
-                mc7p_base_name(asm_buf, name, sizeof(name));
-                op_type = mc7p_op_type(&flow, name);
-        } else {
-                op_type = RZ_ANALYSIS_OP_TYPE_UNK;
+        if (!strcmp(word, "NOT")) {
+                if (out_cap < 1) return -1;
+                out[0] = 0x01;
+                return 1;
         }
-        mc7p_fill_toks(op, op_type);
-        return op->size;
-}
-
-static RzAsmPlugin rz_asm_plugin_mc7plus = {
-        .name = "mc7plus",
-        .desc = "Simatic S7-1200/1500 MC7+ disassembler",
-        .license = "LGPL",
-        .author = "xania.fr glm",
-        .arch = "mc7plus",
-        .cpus = "s7-1200,s7-1500",
-        .bits = 32,
-        .endian = RZ_SYS_ENDIAN_BIG,
-        .disassemble = &disassemble_mc7plus,
-        .assemble = &assemble_mc7plus,
-        .mnemonics = &mc7p_mnemonics,
-};
-
-/* ------------------------------------------------------------- analysis */
-
-static void mc7p_flag_label(RzAnalysis *analysis, ut64 addr, long id) {
-        RzFlagBind *fb;
-        char name[64];
-        if (!analysis || id < 0) {
-                return;
+        if (!strcmp(word, "SET_RLO")) {
+                if (out_cap < 1) return -1;
+                out[0] = 0x02;
+                return 1;
         }
-        fb = rz_analysis_get_flag_bind(analysis);
-        if (!fb || !fb->set || !fb->f) {
-                return;
+        if (!strcmp(word, "STATION")) {
+                if (out_cap < 1) return -1;
+                out[0] = 0x05;
+                return 1;
         }
-        snprintf(name, sizeof(name), "mc7p.label.%ld", id);
-        if (fb->get) {
-                RzFlagItem *old = fb->get(fb->f, name);
-                if (old && old->offset != addr) {
-                        snprintf(name, sizeof(name), "mc7p.label.%ld_%" PFMT64x,
-                                 id, addr);
-                }
+        if (!strcmp(word, "NOP_FF")) {
+                if (out_cap < 2) return -1;
+                out[0] = 0xff;
+                out[1] = 0xff;
+                return 2;
         }
-        fb->set(fb->f, name, addr, 1);
-}
-
-/* Scan forward from off for the LABEL statement carrying id.
- * Returns its offset, or -1. */
-static int mc7p_resolve_label(const ut8 *data, int len, int off, long id) {
-        int steps = 0;
-        while (off < len && steps++ < MC7P_LABEL_SCAN_MAX) {
-                mc7p_flow_t f;
-                int n = mc7p_flow_one(data, (size_t)len, (size_t)off, &f);
-                if (n < 0) {
+        if (!strcmp(word, "LABEL") || !strncmp(word, "JMP", 3)) {
+                unsigned long long id;
+                int n;
+                if (!mc7p_parse_label_id(p, &id)) {
                         return -1;
                 }
-                if (f.kind == MC7P_FLOW_LABEL && f.label_id == id) {
-                        return off;
+                if (!strcmp(word, "LABEL")) {
+                        small[0] = 0x68;
+                } else if (!strcmp(word, "JMP") || !strncmp(word, "JMP{", 4)) {
+                        small[0] = 0x6c;
+                        if (mc7p_has_flag_text(word, "COND")) {
+                                small[0] |= 1;
+                        }
+                        if (mc7p_has_flag_text(word, "NEGATED")) {
+                                small[0] |= 2;
+                        }
+                } else {
+                        return -1;
                 }
-                off += n;
+                n = mc7p_encode_positive_immediate(small + 1, id);
+                if (n < 0 || out_cap < (size_t)(n + 1)) {
+                        return -1;
+                }
+                memcpy(out, small, (size_t)n + 1);
+                return n + 1;
+        }
+        if (!strcmp(word, "RET")) {
+                unsigned long long v = 1;
+                while (*p && isspace((unsigned char)*p)) {
+                        p++;
+                }
+                if (*p) {
+                        if (mc7p_startswith_ci(p, "TRUE")) {
+                                v = 1;
+                        } else if (mc7p_startswith_ci(p, "FALSE")) {
+                                v = 0;
+                        } else if (!mc7p_parse_label_id(p, &v) || v > 2) {
+                                return -1;
+                        }
+                }
+                if (out_cap < 2) return -1;
+                out[0] = 0x14;
+                out[1] = (uint8_t)v;
+                return 2;
         }
         return -1;
 }
-
-static bool mc7p_io_scan_bounds(RzIOBind *iob, ut64 addr, ut64 *base,
-                                ut64 *size) {
-        ut64 from = 0;
-        ut64 to = UT64_MAX;
-        if (!iob || !iob->read_at) {
-                return false;
-        }
-        if (iob->map_get) {
-                RzIOMap *map = iob->map_get(iob->io, addr);
-                if (map) {
-                        from = rz_io_map_get_from(map);
-                        to = rz_io_map_get_to(map);
-                }
-        }
-        if (from > addr) {
-                from = 0;
-        }
-        if (to == UT64_MAX || to < addr) {
-                to = addr + MC7P_LABEL_SCAN_BYTES - 1;
-        }
-        if (to < from) {
-                return false;
-        }
-        *base = from;
-        *size = RZ_MIN(to - from + 1, (ut64)MC7P_LABEL_SCAN_BYTES);
-        return *size > 0;
-}
-
-static bool mc7p_read_analysis_at(RzAnalysis *analysis, RzIOBind *iob,
-                                  ut64 addr, ut8 *buf, size_t size) {
-        RzAnalysisCallbacks *cb = rz_analysis_get_callbacks(analysis);
-        if (cb && cb->read_at && size <= (size_t)INT_MAX &&
-            cb->read_at(analysis, addr, buf, (int)size)) {
-                return true;
-        }
-        return iob && iob->read_at && iob->read_at(iob->io, addr, buf, size);
-}
-
-static size_t mc7p_read_scan_window(RzAnalysis *analysis, RzIOBind *iob,
-                                    ut64 addr, ut8 *buf) {
-        size_t size = MC7P_LABEL_SCAN_WINDOW;
-        while (size > 0) {
-                if (mc7p_read_analysis_at(analysis, iob, addr, buf, size)) {
-                        return size;
-                }
-                size /= 2;
-        }
-        return 0;
-}
-
-/* Resolve a label by scanning the complete mapped code stream from its start.
- * MC7+ instructions are variable length, so backwards resolution cannot start
- * at the current instruction and decode in reverse. */
-static bool mc7p_resolve_label_io(RzAnalysis *analysis, ut64 addr, long id,
-                                  ut64 *target) {
-        RzIOBind *iob;
-        ut64 base = 0, size = 0;
-        ut64 off = 0;
-        int steps = 0;
-
-        if (!analysis) {
-                return false;
-        }
-        iob = rz_analysis_get_io_bind(analysis);
-        if (!mc7p_io_scan_bounds(iob, addr, &base, &size) ||
-            size > (ut64)SIZE_MAX) {
-                return false;
-        }
-        while (off < size && steps++ < MC7P_LABEL_SCAN_MAX) {
-                ut8 buf[MC7P_LABEL_SCAN_WINDOW];
-                mc7p_flow_t f;
-                size_t nread = mc7p_read_scan_window(analysis, iob,
-                                                     base + off, buf);
-                int n;
-                if (nread == 0) {
-                        return false;
-                }
-                n = mc7p_flow_one(buf, nread, 0, &f);
-                if (n < 0) {
-                        break;
-                }
-                if (f.kind == MC7P_FLOW_LABEL && f.label_id == id) {
-                        *target = base + off;
-                        return true;
-                }
-                off += (ut64)n;
-        }
-        return false;
-}
-
-static char *mc7p_get_reg_profile(RzAnalysis *analysis) {
-        return rz_str_dup(
-                "=PC\tpc\n"
-                "=SP\tsp\n"
-                "=A0\tacc\n"
-                "gpr\tpc\t.32\t0\t0\n"
-                "gpr\tsp\t.32\t4\t0\n"
-                "gpr\tacc\t.64\t8\t0\n"
-                "gpr\tstw\t.32\t16\t0\n"
-                "gpr\trlo\t.1\t20\t0\n");
-}
-
-static int analysis_op_mc7plus(RzAnalysis *analysis, RzAnalysisOp *op,
-                               ut64 addr, const ut8 *data, int len,
-                               RzAnalysisOpMask mask) {
-        char asm_buf[MC7P_ASM_BUF];
-        char name[48];
-        mc7p_flow_t flow;
-        int is_return = 0;
-        int read = mc7p_disassemble_one(data, (size_t)len, asm_buf,
-                                        sizeof(asm_buf), &is_return);
-        if (read <= 0) {
-                return op->size;
-        }
-        op->size = read;
-        op->eob = is_return;
-        if (mc7p_flow_one(data, (size_t)len, 0, &flow) < 0) {
-                return op->size;
-        }
-        mc7p_base_name(asm_buf, name, sizeof(name));
-        op->type = mc7p_op_type(&flow, name);
-        switch (flow.kind) {
-        case MC7P_FLOW_LABEL:
-                mc7p_flag_label(analysis, addr, flow.label_id);
-                break;
-        case MC7P_FLOW_JMP:
-        case MC7P_FLOW_CJMP:
-                op->eob = true;
-                if (flow.kind == MC7P_FLOW_CJMP) {
-                        op->fail = addr + read;
-                }
-                if (flow.label_id >= 0) {
-                        ut64 target = UT64_MAX;
-                        if (mc7p_resolve_label_io(analysis, addr,
-                                                  flow.label_id, &target)) {
-                                op->jump = target;
-                        } else {
-                                int loff = mc7p_resolve_label(data, len, read,
-                                                              flow.label_id);
-                                if (loff >= 0) {
-                                        op->jump = addr + loff;
-                                }
-                        }
-                }
-                break;
-        case MC7P_FLOW_RET:
-                op->eob = true;
-                break;
-        case MC7P_FLOW_CALL:
-                op->eob = false;
-                if (flow.label_id >= 0) {
-                        op->val = (ut64)flow.label_id;
-                }
-                break;
-        default:
-                break;
-        }
-        return op->size;
-}
-
-static int archinfo_mc7plus(RzAnalysis *a, RzAnalysisInfoType q) {
-        switch (q) {
-        case RZ_ANALYSIS_ARCHINFO_MIN_OP_SIZE:
-                return 1;
-        case RZ_ANALYSIS_ARCHINFO_MAX_OP_SIZE:
-                return 64;
-        case RZ_ANALYSIS_ARCHINFO_TEXT_ALIGN:
-                /* fall-thru */
-        case RZ_ANALYSIS_ARCHINFO_DATA_ALIGN:
-                return 0;
-        case RZ_ANALYSIS_ARCHINFO_CAN_USE_POINTERS:
-                return true;
-        default:
-                return -1;
-        }
-}
-
-static RzAnalysisPlugin rz_analysis_plugin_mc7plus = {
-        .name = "mc7plus",
-        .desc = "Simatic S7-1200/1500 MC7+ analysis plugin",
-        .arch = "mc7plus",
-        .license = "LGPL3",
-        .bits = 32,
-        .archinfo = archinfo_mc7plus,
-        .op = &analysis_op_mc7plus,
-        .get_reg_profile = &mc7p_get_reg_profile,
-};
-
-static RzArchPlugin rz_arch_plugin_mc7plus = {
-        .p_asm = &rz_asm_plugin_mc7plus,
-        .p_analysis = &rz_analysis_plugin_mc7plus,
-        .p_parse = NULL,
-};
-
-RZ_API RzLibStruct rizin_plugin = {
-        .type = RZ_LIB_TYPE_ARCH,
-        .data = &rz_arch_plugin_mc7plus,
-        .version = RZ_VERSION
-};

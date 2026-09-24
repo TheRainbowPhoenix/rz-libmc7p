@@ -119,6 +119,11 @@ const char *mc7p_op_name(int operation);
 int mc7p_disassemble_one(const uint8_t *code, size_t len, char *buf,
                          size_t bufsize, int *is_return);
 
+/* Assemble one rendered MC7+ statement into bytes.
+ * Returns the encoded byte length, or -1 when the syntax/opcode form is not
+ * supported by the native assembler yet. */
+int mc7p_assemble_one(const char *asm_text, uint8_t *out, size_t out_cap);
+
 /* ---- control-flow classification (rizin plugin support) ---- */
 
 typedef enum {

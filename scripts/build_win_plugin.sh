@@ -42,7 +42,7 @@ mkdir -p "$OUTDIR"
 
 echo "[*] rz_libmc7p.dll (MC7+ arch plugin)"
 "$ZIG" cc -target $TARGET -O2 -shared $EXP $INC \
-        src/mc7plus_isa.c src/mc7plus.c src/plugin_arch_mc7plus.c \
+        src/mc7plus_isa.c src/mc7plus.c src/mc7plus_asm.c src/plugin_arch_mc7plus.c \
         $LIBS -o "$OUTDIR/rz_libmc7p.dll"
 
 echo "[*] libmc7_arch.dll (classic MC7 arch plugin)"
@@ -57,7 +57,7 @@ echo "[*] libmc7_bin.dll (classic MC7 bin plugin)"
 
 echo "[*] dis_mc7plus.exe (standalone CLI, no rizin dependency)"
 "$ZIG" cc -target $TARGET -O2 $INC \
-        unit/dis_mc7plus.c src/mc7plus_isa.c src/mc7plus.c \
+        unit/dis_mc7plus.c src/mc7plus_isa.c src/mc7plus.c src/mc7plus_asm.c \
         -o "$OUTDIR/dis_mc7plus.exe"
 
 echo "[+] done: $OUTDIR"

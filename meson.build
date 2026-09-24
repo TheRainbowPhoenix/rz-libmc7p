@@ -59,6 +59,7 @@ if get_option('build_shared_libs')
   libmc7plus_asm_src = [
     'src' / 'mc7plus_isa.c',
     'src' / 'mc7plus.c',
+    'src' / 'mc7plus_asm.c',
     'src' / 'plugin_arch_mc7plus.c',
   ]
   shared_library('rz_libmc7p', libmc7plus_asm_src,
@@ -89,6 +90,7 @@ test('test_simatic', exe)
 libmc7plus_src = [
   'src' / 'mc7plus_isa.c',
   'src' / 'mc7plus.c',
+  'src' / 'mc7plus_asm.c',
 ]
 
 dis_mc7plus = executable('dis_mc7plus', ['unit' / 'dis_mc7plus.c'] + libmc7plus_src,
@@ -106,3 +108,13 @@ test_mc7plus = executable('test_mc7plus', ['unit' / 'test_mc7plus.c'] + libmc7pl
   implicit_include_directories: false)
 
 test('test_mc7plus', test_mc7plus)
+
+test_mc7plus_asm_roundtrip = executable('test_mc7plus_asm_roundtrip',
+  ['unit' / 'test_mc7plus_asm_roundtrip.c'] + libmc7plus_src,
+  c_args: [],
+  include_directories: include_directories(libmc7_incs),
+  dependencies: [],
+  install: false,
+  implicit_include_directories: false)
+
+test('test_mc7plus_asm_roundtrip', test_mc7plus_asm_roundtrip)
