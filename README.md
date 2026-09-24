@@ -6,8 +6,8 @@ Library to disassemble MC7+ bytecode for Siemens PLC SIMATIC S7-1200 and S7-1500
 
 <img width="1105" height="838" alt="image" src="https://github.com/user-attachments/assets/bd9e8dff-2438-449d-80ae-8e9dc685d759" />
 
+<img width="744" height="833" alt="image" src="https://github.com/user-attachments/assets/ccc30e13-ccd6-4e30-9104-39ae0dc77132" />
 
-<img width="1319" height="247" alt="image" src="https://github.com/user-attachments/assets/326a8e31-3f88-496e-ad24-84e8dbd50c4b" />
 
 
 ## MC7+ support (this fork)
