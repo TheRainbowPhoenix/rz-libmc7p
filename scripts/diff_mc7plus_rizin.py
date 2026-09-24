@@ -39,14 +39,19 @@ MARKER_LINE = re.compile(r"^[A-Za-z0-9_.]+\s*\(\);\s*$")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # asm.lines arrow/box decorations pD puts in front of instruction lines
 # ("┌─<", "│", "└─>", "────────<", ...) when a jump target is known.
-BOX_PREFIX = "│┌└├┤─<>v^╒╞═ \t"
+# Covers all three rizin vline tables (rz_vline_a / _u / _uc).
+BOX_PREFIX = "│┌└├┤─<>v^╒╞═╰╮╭╯╌┄ \t"
+
+# Deterministic rendering on any CI runner: force UTF-8 glyphs (locale
+# independent) and the straight (non-curvy) corner table.
+DET_FLAGS = "e scr.utf8=true; e scr.utf8.curvy=false;"
 
 
 def rizin_disasm(p: Path, size: int, color: bool = False):
-    cmds = "e asm.tabs=0;"
-    if color:
-        cmds = "e scr.color=3;" + cmds
-    cmds += " pD %d" % size
+    # utf8/curvy first, color last (so the forced color wins in the
+    # token-coverage pass and color=0 wins in the plain pass)
+    cmds = DET_FLAGS + ("e scr.color=3;" if color else "e scr.color=0;")
+    cmds += " e asm.tabs=0; pD %d" % size
     r = subprocess.run(
         [RIZIN, "-q", "-n", "-a", "mc7plus", "-b", "32", "-c", cmds, str(p)],
         capture_output=True, text=True,

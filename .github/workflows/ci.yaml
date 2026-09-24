@@ -37,35 +37,50 @@ jobs:
   linux-plugin:
     name: linux x64 rizin plugin + cli
     runs-on: ubuntu-latest
+    env:
+      # custom prefix: no sudo install, no ldconfig, cacheable
+      RZ_PREFIX: ${{ github.workspace }}/rz-install
     steps:
       - uses: actions/checkout@v6
 
-      # meson from apt, NOT pip: `sudo ninja -C rzbuild install` re-runs
-      # the meson recorded at setup time as root; a pip --user meson in
+      # meson from apt, NOT pip: `sudo ninja install` would re-run the
+      # meson recorded at setup time as root; a pip --user meson in
       # ~/.local is invisible to root -> ModuleNotFoundError: mesonbuild
       - name: Install build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config meson ninja-build
 
-      - name: Build rizin v0.9.1 from source (plugin ABI reference)
+      # rizin v0.9.1 takes ~4 min to build; cache the installed prefix
+      # (156 MB, self-contained thanks to -Dlocal=enabled $ORIGIN rpaths)
+      - name: Cache rizin v0.9.1 install prefix
+        id: rz-cache
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: rz-install
+          key: rizin-0.9.1-linux-x64-shared-local-1
+
+      - name: Build + install rizin v0.9.1 (plugin ABI reference, cached)
+        if: steps.rz-cache.outputs.cache-hit != 'true'
         # -Denable_tests/-Denable_rz_test=false skips rizin's own 2500+
-        # test binaries (test/integration/*, test/unit/*): we only need
-        # the SDK (headers + shared libs + the rizin binary)
+        # test binaries we never run; -Dlocal=enabled adds $ORIGIN rpaths
+        # so the installed tree runs without LD_LIBRARY_PATH/ldconfig
         run: |
           git clone --depth 1 --branch v0.9.1 --recurse-submodules \
             --shallow-submodules https://github.com/rizinorg/rizin.git
-          meson setup rzbuild rizin -Ddefault_library=shared --prefix=/usr/local \
-            -Denable_tests=false -Denable_rz_test=false
+          meson setup rzbuild rizin -Ddefault_library=shared -Dlocal=enabled \
+            --prefix="$RZ_PREFIX" -Denable_tests=false -Denable_rz_test=false
           ninja -C rzbuild
-          sudo ninja -C rzbuild install
-          sudo ldconfig
+          meson install -C rzbuild
 
       - name: Build + package rz_libmc7p.so + libmc7_arch.so + libmc7_bin.so + dis_mc7plus
         run: sh scripts/build_linux_plugin.sh dist
 
       - name: Smoke-test the plugins inside real rizin
         run: python3 scripts/smoke_rizin_plugin.py dist/rz-libmc7p-linux64
+        env:
+          RIZIN_BIN: ${{ env.RZ_PREFIX }}/bin/rizin
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

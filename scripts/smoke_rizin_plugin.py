@@ -9,7 +9,10 @@ AddMul statement sequence) and checks that a real rizin process
   2. decodes operands fully (this catches token/decoder regressions like
      the "MOVE1600" dropout),
   3. prints the LABEL<n>(); function markers,
-  4. draws the JMP -> LABEL arrow.
+  4. draws the JMP -> LABEL arrow (checked structurally, not by an exact
+     byte match: rizin renders the gutter differently depending on
+     scr.utf8 / scr.utf8.curvy / scr.color and locale, and with color on
+     it wraps every gutter char in its own escape sequence).
 
 Usage:
   python3 scripts/smoke_rizin_plugin.py [dir-with-so-files]
@@ -17,12 +20,17 @@ Usage:
 The .so directory defaults to the packaged artifact layout next to this
 script (../build-linux or ../rz-libmc7p-linux64).  It is exported to rizin
 via RZ_LIB_PLUGINS, so nothing needs to be installed first.
+
+The rizin commands force scr.color=0 / scr.utf8=true / scr.utf8.curvy=false
+so the rendering is deterministic on any CI runner; the checks are still
+glyph-table agnostic (UTF-8 straight/curvy and ASCII fallbacks accepted).
 """
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -46,10 +54,21 @@ EXPECTED = [
     "RET TRUE",
 ]
 
+# deterministic rendering on any runner (order: utf8 first so curvy=false
+# is meaningful, color last so nothing can re-enable it afterwards)
+DET_FLAGS = "e scr.utf8=true; e scr.utf8.curvy=false; e scr.color=0;"
+
 PD_LINE = re.compile(r"^\s*0x[0-9a-fA-F]+\s+(.+?)\s*$")
 MARKER_LINE = re.compile(r"^[A-Za-z0-9_.]+\s*\(\);\s*$")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-BOX_PREFIX = "│┌└├┤─<>v^╒╞═ \t"
+# asm.lines arrow/box decorations pD puts in front of instruction lines.
+# Covers all three vline tables of rizin 0.9.1 (rz_vline_a / _u / _uc):
+# UTF-8 straight, UTF-8 curvy and the ASCII fallback.
+BOX_PREFIX = "│┌└├┤─<>v^╒╞═╰╮╭╯╌┄└ \t"
+# arrow at the jump target: corner (└ / ` / ╰) + dashes + head (> / ᐳ)
+ARROW_TO_TARGET = re.compile(r"[└`╰][─╌┄-]*[>ᐳ]")
+# arrow at the jump site: corner (┌ / , / ╭) + dashes + head (< / ᐸ)
+ARROW_FROM_JUMP = re.compile(r"[┌,╭][─╌┄-]*[<ᐸ]")
 
 
 def which_rizin() -> str:
@@ -75,6 +94,13 @@ def find_plugin_dir() -> Path:
     sys.exit(2)
 
 
+def gutter_of(raw_line: str) -> str:
+    """ANSI-stripped gutter of a pD line: everything before the 0x column."""
+    t = ANSI.sub("", raw_line)
+    i = t.find("0x")
+    return t[:i] if i >= 0 else ""
+
+
 def main() -> int:
     rizin = which_rizin()
     plugdir = find_plugin_dir()
@@ -82,7 +108,6 @@ def main() -> int:
     # point rizin at a clean dir holding ONLY the plugin .so files (the
     # artifact dir also carries install.sh / README / CLI, which rizin
     # would otherwise try to dlopen and warn about)
-    import tempfile
     tmp = Path(tempfile.mkdtemp(prefix="mc7p-smoke-"))
     for so in plugdir.glob("*.so"):
         shutil.copy(so, tmp / so.name)
@@ -90,21 +115,20 @@ def main() -> int:
 
     # 1) plugin registered?
     out = subprocess.run(
-        [rizin, "-q", "-c", "e asm.arch=?", "-n"],
+        [rizin, "-q", "-c", DET_FLAGS + " e asm.arch=?", "-n"],
         capture_output=True, text=True, env=plug_env,
     )
-    arches = out.stdout
-    if "mc7plus" not in arches:
+    if "mc7plus" not in out.stdout:
         print("FAIL: asm.arch=mc7plus not registered (RZ_LIB_PLUGINS=%s)" % tmp)
         return 1
     print("[+] asm.arch=mc7plus registered")
 
     # 2-4) disasm content
-    blob = Path("/tmp/mc7p_smoke_addmul.bin")
+    blob = Path(tempfile.mkdtemp(prefix="mc7p-smoke-blob-")) / "addmul.bin"
     blob.write_bytes(BLOB)
     r = subprocess.run(
         [rizin, "-q", "-n", "-a", "mc7plus", "-b", "32",
-         "-c", "e asm.tabs=0; pD %d" % len(BLOB), str(blob)],
+         "-c", DET_FLAGS + " e asm.tabs=0; pD %d" % len(BLOB), str(blob)],
         capture_output=True, text=True, env=plug_env,
     )
     if r.returncode != 0:
@@ -113,13 +137,20 @@ def main() -> int:
 
     stmts = []
     markers = []
+    jmp_gutters = []
+    tgt_gutters = []
     for line in r.stdout.splitlines():
-        text = ANSI.sub("", line).lstrip(BOX_PREFIX)
-        m = PD_LINE.match(text)
+        text = ANSI.sub("", line)
+        stripped = text.lstrip(BOX_PREFIX)
+        m = PD_LINE.match(stripped)
         if m:
             stmts.append(m.group(1))
-        elif MARKER_LINE.match(text.strip()):
-            markers.append(text.strip())
+            if m.group(1) == "JMP 1":
+                jmp_gutters.append(gutter_of(line))
+            elif m.group(1) == "LABEL 1":
+                tgt_gutters.append(gutter_of(line))
+        elif MARKER_LINE.match(stripped.strip()):
+            markers.append(stripped.strip())
 
     problems = []
     if stmts != EXPECTED:
@@ -130,20 +161,43 @@ def main() -> int:
                 problems.append("  line %d: want %r got %r" % (i + 1, e, g))
     if not any(m.startswith("LABEL0(") for m in markers):
         problems.append("  no LABEL0(); function marker in pD output")
-    if "└─>" not in r.stdout:
-        problems.append("  no jump arrow (└─>) rendered for JMP 1 -> LABEL 1")
+    # structural arrow check: the LABEL 1 line's gutter must carry
+    # corner+dashes+arrowhead (and the JMP 1 line the mirrored one)
+    if not any(ARROW_TO_TARGET.search(g) for g in tgt_gutters):
+        problems.append("  no jump arrow at the LABEL 1 target line "
+                        "(want corner+dashes+head, e.g. `-+>")
+    if not any(ARROW_FROM_JUMP.search(g) for g in jmp_gutters):
+        problems.append("  no mirrored arrow at the JMP 1 line "
+                        "(want corner+dashes+head, e.g. ,-=<)")
 
     if problems:
         print("FAIL (%d):" % len(problems))
         for p in problems:
             print(p)
-        print("--- raw pD output ---")
-        print(r.stdout)
+        # ---- rich diagnostics: exact codepoints + env + config ----
+        print("--- diagnostics ---")
+        v = subprocess.run([rizin, "-v"], capture_output=True, text=True)
+        print("rizin: %s" % (v.stdout.splitlines() or ["?"])[0])
+        for k in ("TERM", "LANG", "LC_ALL", "COLORTERM", "COLUMNS",
+                  "NO_COLOR", "CI", "GITHUB_ACTIONS"):
+            if k in os.environ:
+                print("env %s=%r" % (k, os.environ[k]))
+        cfg = subprocess.run(
+            [rizin, "-q", "-n", "-c", "e scr.color; e scr.utf8; e scr.utf8.curvy"],
+            capture_output=True, text=True, env=plug_env,
+        )
+        print("rizin cfg (scr.color/utf8/curvy): %s" %
+              " ".join(cfg.stdout.split()))
+        print("--- raw pD output, one repr per line (exact codepoints) ---")
+        for line in r.stdout.splitlines():
+            print(repr(line))
+        print("--- raw stdout bytes, hex ---")
+        print(r.stdout.encode("utf-8", "replace").hex())
         return 1
 
     print("[+] %d statements match the reference text" % len(EXPECTED))
     print("[+] LABEL0();/LABEL1(); function markers present")
-    print("[+] JMP -> LABEL jump arrow rendered")
+    print("[+] JMP -> LABEL jump arrow rendered (structural check)")
     print("SMOKE OK (%s, plugins from %s)" % (Path(rizin).name, tmp))
     return 0
 
