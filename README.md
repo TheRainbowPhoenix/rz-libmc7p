@@ -44,6 +44,24 @@ MOVE :Word @SL.Slot16.0 0
 
 ### Installing the plugin into a real rizin / Cutter
 
+**Windows (64-bit):** No build tools or GitHub account required. Click the button below to download the ready-to-use ZIP, then extract it and copy the plugin DLLs into your Rizin/Cutter plugin directory. If the directory doesn't exist, create it first.
+
+<a href="https://github.com/TheRainbowPhoenix/rz-libmc7p/releases/download/mc7p-rolling/rz-libmc7p-win64.zip">
+  <img src="assets/download-windows.svg" alt="Download the MC7+ plugin for Windows (64-bit ZIP)" width="420">
+</a>
+
+1. **Download** the ZIP using the button above.
+2. **Extract** the ZIP (right-click → **Extract All…**). If it contains a subfolder, open it.
+3. **Copy** `rz_libmc7p.dll`, `libmc7_arch.dll`, and `libmc7_bin.dll` into the following directory. Paste this path into File Explorer's address bar; Windows expands `%USERPROFILE%` to your account's home directory:
+
+   ```text
+   %USERPROFILE%\.local\lib\rizin\plugins\
+   ```
+
+4. **Restart** Rizin or Cutter. Choose the `mc7plus` architecture when opening raw MC7+ bytecode.
+
+**Compatibility:** The plugin DLLs must match the version of Rizin used by your installation (including the copy bundled with Cutter). If the plugin doesn't load, check its version compatibility.
+
 **Linux:** see [README_LINUX.md](README_LINUX.md) -- covers the CI artifact
 (`rz-libmc7p-linux64`) + `install.sh`, building from source, plugin search
 paths (`rizin -H RZ_USER_PLUGINS`), Cutter AppImage and troubleshooting.
