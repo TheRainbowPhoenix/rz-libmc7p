@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="96" viewBox="0 0 420 96" role="img" aria-labelledby="title desc">
+  <title id="title">Download for Windows</title>
+  <desc id="desc">Download the MC7+ plugin ZIP for 64-bit Windows</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2678d9"/>
+      <stop offset="1" stop-color="#14509f"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="418" height="94" rx="16" fill="url(#bg)" stroke="#81b9fb" stroke-width="2"/>
+  <g fill="#fff" transform="translate(25 26)">
+    <path d="M0 5 21 2v20H0zm25-4L52-3v25H25zM0 26h21v20L0 43zm25 0h27v25l-27-4z"/>
+  </g>
+  <text x="98" y="41" font-family="Arial,Helvetica,sans-serif" font-size="23" font-weight="700" fill="white">Download for Windows</text>
+  <text x="99" y="66" font-family="Arial,Helvetica,sans-serif" font-size="15" fill="#eaf3ff">64-bit · ZIP archive · No GitHub account needed</text>
+  <g transform="translate(383 28)" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M0 0v24m-9-9 9 9 9-9M-12 31h24"/>
+  </g>
+</svg>
