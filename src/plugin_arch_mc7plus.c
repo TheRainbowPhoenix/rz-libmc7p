@@ -23,9 +23,8 @@
  *  - the analysis plugin classifies JMP/JMP_* (label targets), CALL_*
  *    and RET statements, resolving jump label ids to in-blob addresses
  *    so Cutter draws jump arrows for them.
- *  - every LABEL statement is registered as a named function
- *    ("LABEL<n>") so it shows up as a fcn-style marker and in the
- *    function list.
+ *  - LABEL statements are valid jump targets; JMP/JMP_* references to them
+ *    split basic blocks inside the analyzed function.
  */
 #include <rz_arch.h>
 #include <rz_lib.h>
@@ -34,12 +33,23 @@
 #include <rz_types.h>
 #include <rz_vector.h>
 
+#include <limits.h>
+#include <stdint.h>
+
 #include "mc7plus.h"
 
 #define MC7P_ASM_BUF 256
 
 /* Maximum statements scanned when resolving a jump label target. */
 #define MC7P_LABEL_SCAN_MAX 4096
+
+/* Maximum mapped bytes scanned when resolving LABEL targets through rizin IO.
+ * MC7+ code blobs in this plugin are normally compact FC/FB bodies; this keeps
+ * analysis bounded while still covering long forward/backward arrows. */
+#define MC7P_LABEL_SCAN_BYTES (4 * 1024 * 1024)
+
+/* Enough bytes to decode any single MC7+ statement during label scans. */
+#define MC7P_LABEL_SCAN_WINDOW 64
 
 /* ----------------------------------------------------- opcode semantics */
 
@@ -384,6 +394,96 @@ static int mc7p_resolve_label(const ut8 *data, int len, int off, long id) {
         return -1;
 }
 
+static bool mc7p_io_scan_bounds(RzIOBind *iob, ut64 addr, ut64 *base,
+                                ut64 *size) {
+        ut64 from = 0;
+        ut64 to = UT64_MAX;
+        if (!iob || !iob->read_at) {
+                return false;
+        }
+        if (iob->map_get) {
+                RzIOMap *map = iob->map_get(iob->io, addr);
+                if (map) {
+                        from = rz_io_map_get_from(map);
+                        to = rz_io_map_get_to(map);
+                }
+        }
+        if (from > addr) {
+                from = 0;
+        }
+        if (to == UT64_MAX || to < addr) {
+                to = addr + MC7P_LABEL_SCAN_BYTES - 1;
+        }
+        if (to < from) {
+                return false;
+        }
+        *base = from;
+        *size = RZ_MIN(to - from + 1, (ut64)MC7P_LABEL_SCAN_BYTES);
+        return *size > 0;
+}
+
+static bool mc7p_read_analysis_at(RzAnalysis *analysis, RzIOBind *iob,
+                                  ut64 addr, ut8 *buf, size_t size) {
+        RzAnalysisCallbacks *cb = rz_analysis_get_callbacks(analysis);
+        if (cb && cb->read_at && size <= (size_t)INT_MAX &&
+            cb->read_at(analysis, addr, buf, (int)size)) {
+                return true;
+        }
+        return iob && iob->read_at && iob->read_at(iob->io, addr, buf, size);
+}
+
+static size_t mc7p_read_scan_window(RzAnalysis *analysis, RzIOBind *iob,
+                                    ut64 addr, ut8 *buf) {
+        size_t size = MC7P_LABEL_SCAN_WINDOW;
+        while (size > 0) {
+                if (mc7p_read_analysis_at(analysis, iob, addr, buf, size)) {
+                        return size;
+                }
+                size /= 2;
+        }
+        return 0;
+}
+
+/* Resolve a label by scanning the complete mapped code stream from its start.
+ * MC7+ instructions are variable length, so backwards resolution cannot start
+ * at the current instruction and decode in reverse. */
+static bool mc7p_resolve_label_io(RzAnalysis *analysis, ut64 addr, long id,
+                                  ut64 *target) {
+        RzIOBind *iob;
+        ut64 base = 0, size = 0;
+        ut64 off = 0;
+        int steps = 0;
+
+        if (!analysis) {
+                return false;
+        }
+        iob = rz_analysis_get_io_bind(analysis);
+        if (!mc7p_io_scan_bounds(iob, addr, &base, &size) ||
+            size > (ut64)SIZE_MAX) {
+                return false;
+        }
+        while (off < size && steps++ < MC7P_LABEL_SCAN_MAX) {
+                ut8 buf[MC7P_LABEL_SCAN_WINDOW];
+                mc7p_flow_t f;
+                size_t nread = mc7p_read_scan_window(analysis, iob,
+                                                     base + off, buf);
+                int n;
+                if (nread == 0) {
+                        return false;
+                }
+                n = mc7p_flow_one(buf, nread, 0, &f);
+                if (n < 0) {
+                        break;
+                }
+                if (f.kind == MC7P_FLOW_LABEL && f.label_id == id) {
+                        *target = base + off;
+                        return true;
+                }
+                off += (ut64)n;
+        }
+        return false;
+}
+
 static int analysis_op_mc7plus(RzAnalysis *analysis, RzAnalysisOp *op,
                                ut64 addr, const ut8 *data, int len,
                                RzAnalysisOpMask mask) {
@@ -404,34 +504,8 @@ static int analysis_op_mc7plus(RzAnalysis *analysis, RzAnalysisOp *op,
         mc7p_base_name(asm_buf, name, sizeof(name));
         op->type = mc7p_op_type(&flow, name);
         switch (flow.kind) {
-        case MC7P_FLOW_LABEL: {
-                /* A LABEL statement marks the entry of a labeled code
-                 * block.  Register it as a named function ("LABEL<n>")
-                 * so rizin/Cutter render a fcn-style marker line, the
-                 * label appears in the function list, and the arrows
-                 * from JMP/JMP_* statements land on a named location.
-                 * Jump-target labels may live before or after the
-                 * jumping statement, so do this right here while the
-                 * linear sweep passes over the blob. */
-                if (analysis && !rz_analysis_get_function_at(analysis, addr)) {
-                        char lname[40];
-                        snprintf(lname, sizeof(lname), "LABEL%ld",
-                                 flow.label_id);
-                        if (!rz_analysis_create_function(analysis, lname,
-                                                         addr,
-                                                         RZ_ANALYSIS_FCN_TYPE_FCN)) {
-                                /* same label id in another block blob:
-                                 * disambiguate with the address */
-                                snprintf(lname, sizeof(lname),
-                                         "LABEL%ld_%" PFMT64x,
-                                         flow.label_id, addr);
-                                rz_analysis_create_function(analysis, lname,
-                                                            addr,
-                                                            RZ_ANALYSIS_FCN_TYPE_FCN);
-                        }
-                }
+        case MC7P_FLOW_LABEL:
                 break;
-        }
         case MC7P_FLOW_JMP:
         case MC7P_FLOW_CJMP:
                 op->eob = true;
@@ -439,10 +513,16 @@ static int analysis_op_mc7plus(RzAnalysis *analysis, RzAnalysisOp *op,
                         op->fail = addr + read;
                 }
                 if (flow.label_id >= 0) {
-                        int loff = mc7p_resolve_label(data, len, read,
-                                                      flow.label_id);
-                        if (loff >= 0) {
-                                op->jump = addr + loff;
+                        ut64 target = UT64_MAX;
+                        if (mc7p_resolve_label_io(analysis, addr,
+                                                  flow.label_id, &target)) {
+                                op->jump = target;
+                        } else {
+                                int loff = mc7p_resolve_label(data, len, read,
+                                                              flow.label_id);
+                                if (loff >= 0) {
+                                        op->jump = addr + loff;
+                                }
                         }
                 }
                 break;

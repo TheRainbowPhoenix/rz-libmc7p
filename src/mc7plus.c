@@ -1735,11 +1735,15 @@ int mc7p_flow_one(const uint8_t *code, size_t len, size_t off,
         } else if (nm && strncmp(nm, "JMP", 3) == 0) {
                 /* plain JMP: label in operand 0; every other JMP_* variant
                  * carries the target label in the LAST operand (zymatik VM
-                 * reads o[-1]).  The wire COND flag marks conditional. */
+                 * reads o[-1]).  JMP_* variants are conditional by opcode;
+                 * exact JMP is conditional when the wire COND/NEGATED flag
+                 * is present. */
                 int i;
                 const mc7p_access_t *a = NULL;
+                flow_cond = strcmp(nm, "JMP") != 0;
                 for (i = 0; i < best.flag_count; i++) {
-                        if (best.flags[i] == MC7P_FLAG_COND) {
+                        if (best.flags[i] == MC7P_FLAG_COND ||
+                            best.flags[i] == MC7P_FLAG_NEGATED) {
                                 flow_cond = 1;
                                 break;
                         }

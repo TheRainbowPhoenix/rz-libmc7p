@@ -5,3 +5,11 @@ r2-simatic-s7/*.o
 build*/
 build-plugin/
 dist/
+.codex/tmp/
+rz-win.zip
+rizin-win-installer-clang_cl-64/
+.zig-cache-global/
+.zig-cache-local/
+test_mc7plus_flow*.exe
+dis_mc7plus_flow.exe
+rizin-dev

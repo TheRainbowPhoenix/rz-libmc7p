@@ -12,6 +12,23 @@
 #include "mc7plus.h"
 #include "mc7plus_test_vectors.h"
 
+static int expect_flow(const char *name, const uint8_t *code, size_t code_len,
+		       mc7p_flow_kind_t kind, long label_id) {
+	mc7p_flow_t flow;
+	int n = mc7p_flow_one(code, code_len, 0, &flow);
+	if (n <= 0) {
+		printf("FAIL %s: flow decode error\n", name);
+		return 1;
+	}
+	if (flow.kind != kind || flow.label_id != label_id) {
+		printf("FAIL %s: flow kind=%d label=%ld, expected kind=%d label=%ld\n",
+		       name, flow.kind, flow.label_id, kind, label_id);
+		return 1;
+	}
+	printf("PASS %s flow\n", name);
+	return 0;
+}
+
 int main(void) {
 	int n = (int)(sizeof(mc7p_test_cases) / sizeof(mc7p_test_cases[0]));
 	int i, fails = 0;
@@ -71,6 +88,17 @@ int main(void) {
 			free(joined);
 		}
 		mc7p_free_list(&list);
+	}
+	{
+		const uint8_t jmp_plain[] = { 0x6c, 0x20, 0x11 };
+		const uint8_t jmp_negated[] = { 0x6e, 0x20, 0x14 };
+		const uint8_t jmp_bbool[] = { 0xfb, 0x52, 0x44, 0x01, 0x20, 0x4b };
+		fails += expect_flow("JMP", jmp_plain, sizeof(jmp_plain),
+				     MC7P_FLOW_JMP, 17);
+		fails += expect_flow("JMP{NEGATED}", jmp_negated,
+				     sizeof(jmp_negated), MC7P_FLOW_CJMP, 20);
+		fails += expect_flow("JMP_BBOOL", jmp_bbool, sizeof(jmp_bbool),
+				     MC7P_FLOW_CJMP, 75);
 	}
 	if (fails) {
 		printf("%d/%d vectors FAILED\n", fails, n);
