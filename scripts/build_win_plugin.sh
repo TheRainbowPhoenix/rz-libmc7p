@@ -19,6 +19,7 @@
 #   libmc7_arch.dll     classic MC7 arch plugin          -> asm.arch=mc7
 #   libmc7_bin.dll      classic MC7 bin loader (0x7070 'pp' containers)
 #   dis_mc7plus.exe     standalone MC7+ disassembler CLI (no rizin needed)
+#   test_mc7plus_asm_roundtrip.exe standalone assembler round-trip test
 #
 # Plugin ABI note: the DLL imports from rz_*-0.9.dll-style shippers that
 # already sit next to rizin.exe / cutter.exe, so no runtime redistribution
@@ -59,5 +60,10 @@ echo "[*] dis_mc7plus.exe (standalone CLI, no rizin dependency)"
 "$ZIG" cc -target $TARGET -O2 $INC \
         unit/dis_mc7plus.c src/mc7plus_isa.c src/mc7plus.c src/mc7plus_asm.c \
         -o "$OUTDIR/dis_mc7plus.exe"
+
+echo "[*] test_mc7plus_asm_roundtrip.exe (standalone asm round-trip test)"
+"$ZIG" cc -target $TARGET -O2 $INC \
+        unit/test_mc7plus_asm_roundtrip.c src/mc7plus_isa.c src/mc7plus.c src/mc7plus_asm.c \
+        -o "$OUTDIR/test_mc7plus_asm_roundtrip.exe"
 
 echo "[+] done: $OUTDIR"

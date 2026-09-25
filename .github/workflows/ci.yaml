@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
 
@@ -55,7 +55,7 @@ jobs:
       # (156 MB, self-contained thanks to -Dlocal=enabled $ORIGIN rpaths)
       - name: Cache rizin v0.9.1 install prefix
         id: rz-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         continue-on-error: true
         with:
           path: rz-install
@@ -83,7 +83,7 @@ jobs:
           RIZIN_BIN: ${{ env.RZ_PREFIX }}/bin/rizin
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rz-libmc7p-linux64
           path: dist/rz-libmc7p-linux64/
@@ -109,7 +109,7 @@ jobs:
         run: sh scripts/build_win_plugin.sh dist
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rz-libmc7p-win64
           path: dist/rz-libmc7p-win64/
