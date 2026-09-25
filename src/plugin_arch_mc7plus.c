@@ -1629,6 +1629,395 @@ static char *mc7p_get_reg_profile(RzAnalysis *analysis) {
                 "gpr\trlo\t.1\t20\t0\n");
 }
 
+#define MC7P_REF_BASE 0x6d63377000000000ULL
+#define MC7P_REF_CLASS_DB 1ULL
+#define MC7P_REF_CLASS_MEM 2ULL
+#define MC7P_REF_CLASS_SLOT 3ULL
+#define MC7P_REF_CLASS_INDIRECT 4ULL
+
+static int mc7p_type_bytes(int t) {
+        switch (t) {
+        case MC7P_OT_BOOL:
+        case MC7P_OT_BBOOL:
+        case MC7P_OT_BYTE:
+        case MC7P_OT_CHAR:
+        case MC7P_OT_USINT:
+        case MC7P_OT_SINT:
+                return 1;
+        case MC7P_OT_WORD:
+        case MC7P_OT_INT:
+        case MC7P_OT_UINT:
+        case MC7P_OT_WCHAR:
+        case MC7P_OT_DATE:
+        case MC7P_OT_S5TIME:
+                return 2;
+        case MC7P_OT_DWORD:
+        case MC7P_OT_DINT:
+        case MC7P_OT_UDINT:
+        case MC7P_OT_REAL:
+        case MC7P_OT_TIME:
+        case MC7P_OT_TIME_OF_DAY:
+                return 4;
+        case MC7P_OT_LWORD:
+        case MC7P_OT_LINT:
+        case MC7P_OT_ULINT:
+        case MC7P_OT_LREAL:
+        case MC7P_OT_LTIME:
+        case MC7P_OT_LTOD:
+        case MC7P_OT_LDT:
+        case MC7P_OT_DTL:
+                return 8;
+        default:
+                return 1;
+        }
+}
+
+static const char *mc7p_slot_scope_name(int scope) {
+        switch (scope) {
+        case MC7P_SCOPE_NATIVELOCAL: return "SL";
+        case MC7P_SCOPE_NATIVEGLOBAL: return "SG";
+        case MC7P_SCOPE_NATIVEBLOCK: return "SB";
+        case MC7P_SCOPE_NATIVECALL: return "SC";
+        default: return "S";
+        }
+}
+
+static const char *mc7p_mem_area_name(int area) {
+        switch (area) {
+        case MC7P_AREA_INPUT: return "I";
+        case MC7P_AREA_OUTPUT: return "Q";
+        case MC7P_AREA_MEMORY: return "M";
+        case MC7P_AREA_LOCAL: return "L";
+        case MC7P_AREA_PINPUT: return "PI";
+        case MC7P_AREA_POUTPUT: return "PQ";
+        default:
+                return (area >= 0 && area < MC7P_AREA_NAME_COUNT &&
+                        mc7p_area_names[area]) ? mc7p_area_names[area] : "AREA";
+        }
+}
+
+static const char *mc7p_db_prefix(int range) {
+        switch (range) {
+        case MC7P_AREA_DBRETAIN: return "DBR";
+        case MC7P_AREA_DBVOLATILE: return "DBV";
+        default: return "DB";
+        }
+}
+
+static const char *mc7p_width_name(int bytes, bool bit) {
+        if (bit) {
+                return "X";
+        }
+        switch (bytes) {
+        case 1: return "B";
+        case 2: return "W";
+        case 4: return "D";
+        case 8: return "L";
+        default: return "B";
+        }
+}
+
+static ut64 mc7p_ref_addr(const mc7p_access_t *a) {
+        ut64 cls, hi, lo;
+        if (!a) {
+                return UT64_MAX;
+        }
+        switch (a->kind) {
+        case MC7P_ACC_DBPI:
+                cls = MC7P_REF_CLASS_DB << 48;
+                hi = ((ut64)(a->range & 0xff) << 40) |
+                     ((ut64)(a->number & 0xfffff) << 20);
+                lo = (ut64)(a->offset & 0xfffff);
+                return MC7P_REF_BASE | cls | hi | lo;
+        case MC7P_ACC_MEMORY:
+                cls = MC7P_REF_CLASS_MEM << 48;
+                hi = ((ut64)(a->area & 0xff) << 40);
+                lo = (ut64)(a->offset & 0xffffffffffULL);
+                return MC7P_REF_BASE | cls | hi | lo;
+        case MC7P_ACC_SLOT:
+                cls = MC7P_REF_CLASS_SLOT << 48;
+                hi = ((ut64)(a->scope & 0xff) << 40) |
+                     ((ut64)(a->slot_type & 0xff) << 32);
+                lo = (ut64)(a->slot_number & 0xffffffffULL);
+                return MC7P_REF_BASE | cls | hi | lo;
+        case MC7P_ACC_INDIRECT:
+                cls = MC7P_REF_CLASS_INDIRECT << 48;
+                hi = a->base ? (mc7p_ref_addr(a->base) & 0x0000ffff00000000ULL) : 0;
+                lo = a->offset_acc ? (mc7p_ref_addr(a->offset_acc) & 0xffffffffULL) : 0;
+                return MC7P_REF_BASE | cls | hi | lo;
+        default:
+                return UT64_MAX;
+        }
+}
+
+static void mc7p_access_name(const mc7p_access_t *a, int effective_type,
+                             char *buf, size_t bufsz) {
+        int bytes;
+        if (!bufsz) {
+                return;
+        }
+        buf[0] = 0;
+        if (!a) {
+                return;
+        }
+        bytes = mc7p_type_bytes(effective_type >= 0 ? effective_type :
+                                a->data_type);
+        switch (a->kind) {
+        case MC7P_ACC_DBPI: {
+                unsigned long long byte = a->offset / 8;
+                unsigned long long bit = a->offset % 8;
+                const char *pre = mc7p_db_prefix(a->range);
+                if (bit || effective_type == MC7P_OT_BOOL ||
+                    (effective_type < 0 && a->data_type == MC7P_OT_BOOL)) {
+                        snprintf(buf, bufsz, "mc7p.db.%s%d.DBX%llu.%llu",
+                                 pre, a->number, byte, bit);
+                } else {
+                        snprintf(buf, bufsz, "mc7p.db.%s%d.DB%s%llu",
+                                 pre, a->number, mc7p_width_name(bytes, false),
+                                 byte);
+                }
+                break;
+        }
+        case MC7P_ACC_MEMORY: {
+                unsigned long long byte = a->offset / 8;
+                unsigned long long bit = a->offset % 8;
+                const char *area = mc7p_mem_area_name(a->area);
+                if (bit || effective_type == MC7P_OT_BOOL ||
+                    (effective_type < 0 && a->data_type == MC7P_OT_BOOL)) {
+                        snprintf(buf, bufsz, "mc7p.mem.%s%llu.%llu",
+                                 area, byte, bit);
+                } else {
+                        snprintf(buf, bufsz, "mc7p.mem.%s%s%llu",
+                                 area, mc7p_width_name(bytes, false), byte);
+                }
+                break;
+        }
+        case MC7P_ACC_SLOT:
+                snprintf(buf, bufsz, "mc7p.slot.%s.%s.%d",
+                         mc7p_slot_scope_name(a->scope),
+                         (a->slot_type >= 0 &&
+                          a->slot_type < 8 &&
+                          mc7p_range_names[a->slot_type]) ?
+                                 mc7p_range_names[a->slot_type] : "Slot",
+                         a->slot_number);
+                break;
+        case MC7P_ACC_INDIRECT:
+                snprintf(buf, bufsz, "mc7p.indirect.%016" PFMT64x,
+                         mc7p_ref_addr(a));
+                break;
+        default:
+                break;
+        }
+        for (char *p = buf; *p; p++) {
+                if (!isalnum((unsigned char)*p) && *p != '_' && *p != '.') {
+                        *p = '_';
+                }
+        }
+}
+
+static void mc7p_flag_access(RzAnalysis *analysis, const mc7p_access_t *a,
+                             int effective_type, ut64 refaddr, int size) {
+        RzFlagBind *fb;
+        char name[96];
+        if (!analysis || refaddr == UT64_MAX) {
+                return;
+        }
+        fb = rz_analysis_get_flag_bind(analysis);
+        if (!fb || !fb->set || !fb->f) {
+                return;
+        }
+        mc7p_access_name(a, effective_type, name, sizeof(name));
+        if (!name[0]) {
+                return;
+        }
+        fb->set(fb->f, name, refaddr, RZ_MAX(1, size));
+}
+
+static RzAnalysisValue *mc7p_analysis_value_for_access(const mc7p_access_t *a,
+                                                       RzAnalysisValueAccess access,
+                                                       int effective_type) {
+        RzAnalysisValue *v;
+        ut64 refaddr = mc7p_ref_addr(a);
+        if (refaddr == UT64_MAX) {
+                return NULL;
+        }
+        v = rz_analysis_value_new();
+        if (!v) {
+                return NULL;
+        }
+        v->type = RZ_ANALYSIS_VAL_MEM;
+        v->access = access;
+        v->absolute = 1;
+        v->base = refaddr;
+        v->memref = mc7p_type_bytes(effective_type >= 0 ? effective_type :
+                                    a->data_type);
+        v->plugin_specific = (ut64)a->kind;
+        return v;
+}
+
+static void mc7p_op_add_value(RzAnalysis *analysis, RzAnalysisOp *op,
+                              const mc7p_access_t *a,
+                              RzAnalysisValueAccess access,
+                              int effective_type) {
+        RzAnalysisValue *v;
+        int size;
+        if (!a || !(access & (RZ_ANALYSIS_ACC_R | RZ_ANALYSIS_ACC_W))) {
+                return;
+        }
+        if (a->kind == MC7P_ACC_INDIRECT) {
+                mc7p_op_add_value(analysis, op, a->base, RZ_ANALYSIS_ACC_R, -1);
+                mc7p_op_add_value(analysis, op, a->offset_acc, RZ_ANALYSIS_ACC_R, -1);
+        }
+        v = mc7p_analysis_value_for_access(a, access, effective_type);
+        if (!v) {
+                return;
+        }
+        size = v->memref;
+        if (!op->access) {
+                op->access = rz_list_newf((RzListFree)rz_analysis_value_free);
+        }
+        if (op->access) {
+                rz_list_append(op->access, rz_analysis_value_copy(v));
+        }
+        if ((access & RZ_ANALYSIS_ACC_W) && !op->dst) {
+                op->dst = rz_analysis_value_copy(v);
+        } else if ((access & RZ_ANALYSIS_ACC_R)) {
+                for (size_t i = 0; i < RZ_ARRAY_SIZE(op->src); i++) {
+                        if (!op->src[i]) {
+                                op->src[i] = rz_analysis_value_copy(v);
+                                break;
+                        }
+                }
+        }
+        if (access & RZ_ANALYSIS_ACC_R) {
+                op->direction |= RZ_ANALYSIS_OP_DIR_READ;
+        }
+        if (access & RZ_ANALYSIS_ACC_W) {
+                op->direction |= RZ_ANALYSIS_OP_DIR_WRITE;
+        }
+        mc7p_flag_access(analysis, a, effective_type, v->base, size);
+        if (analysis && op->addr != UT64_MAX) {
+                rz_analysis_xrefs_set(analysis, op->addr, v->base,
+                                      RZ_ANALYSIS_XREF_TYPE_DATA);
+        }
+        rz_analysis_value_free(v);
+}
+
+static RzAnalysisValueAccess mc7p_mode_access(int mode) {
+        switch (mode) {
+        case MC7P_MODE_DEST:
+                return RZ_ANALYSIS_ACC_W;
+        case MC7P_MODE_SRC:
+        case MC7P_MODE_POINTER:
+        case MC7P_MODE_DIRECT:
+        case MC7P_MODE_SYSPTR:
+        case MC7P_MODE_BLOCK:
+        case MC7P_MODE_ARRAY:
+        case MC7P_MODE_LOCAL:
+        case MC7P_MODE_LOCAL32:
+                return RZ_ANALYSIS_ACC_R;
+        default:
+                return RZ_ANALYSIS_ACC_UNKNOWN;
+        }
+}
+
+static bool mc7p_access_is_ref(const mc7p_access_t *a) {
+        return a && (a->kind == MC7P_ACC_DBPI ||
+                     a->kind == MC7P_ACC_MEMORY ||
+                     a->kind == MC7P_ACC_SLOT ||
+                     a->kind == MC7P_ACC_INDIRECT);
+}
+
+static void mc7p_fill_access_from_params(RzAnalysis *analysis, RzAnalysisOp *op,
+                                         const mc7p_stmt_t *st) {
+        const mc7p_op_t *info;
+        int oi = 0;
+        int effective_type = -1;
+        if (!st || st->operation < 0 || st->operation >= MC7P_OP_COUNT) {
+                return;
+        }
+        info = &mc7p_ops[st->operation];
+        for (int pi = 0; pi < info->param_count && oi < st->operand_count; pi++) {
+                const mc7p_param_t *p = &mc7p_params[info->param_off + pi];
+                const mc7p_access_t *a;
+                RzAnalysisValueAccess access;
+                if (p->kind == MC7P_PARAM_FLAG ||
+                    p->kind == MC7P_PARAM_CODING) {
+                        continue;
+                }
+                a = st->operands[oi++];
+                if (p->kind == MC7P_PARAM_TYPE && a->kind == MC7P_ACC_TYPE) {
+                        effective_type = a->type_val;
+                        continue;
+                }
+                if (p->kind != MC7P_PARAM_IDENT || !mc7p_access_is_ref(a)) {
+                        continue;
+                }
+                access = mc7p_mode_access(p->mode);
+                if (access == RZ_ANALYSIS_ACC_UNKNOWN) {
+                        continue;
+                }
+                mc7p_op_add_value(analysis, op, a, access, effective_type);
+        }
+}
+
+static void mc7p_fill_access_fallback(RzAnalysis *analysis, RzAnalysisOp *op,
+                                      const mc7p_stmt_t *st,
+                                      const char *name) {
+        int first_ref = -1;
+        int effective_type = -1;
+        if (!st || !name) {
+                return;
+        }
+        for (int i = 0; i < st->operand_count; i++) {
+                if (st->operands[i] && st->operands[i]->kind == MC7P_ACC_TYPE) {
+                        effective_type = st->operands[i]->type_val;
+                        break;
+                }
+        }
+        for (int i = 0; i < st->operand_count; i++) {
+                if (mc7p_access_is_ref(st->operands[i])) {
+                        first_ref = i;
+                        break;
+                }
+        }
+        if (first_ref < 0) {
+                return;
+        }
+        for (int i = first_ref; i < st->operand_count; i++) {
+                RzAnalysisValueAccess access = RZ_ANALYSIS_ACC_R;
+                if (!mc7p_access_is_ref(st->operands[i])) {
+                        continue;
+                }
+                if (!strncmp(name, "MOVE", 4) && i == first_ref) {
+                        access = RZ_ANALYSIS_ACC_W;
+                } else if ((!strcmp(name, "ADD") || !strcmp(name, "SUB") ||
+                            !strcmp(name, "MUL") || !strcmp(name, "DIV") ||
+                            !strcmp(name, "MOD") || !strcmp(name, "AND") ||
+                            !strcmp(name, "OR") || !strcmp(name, "XOR")) &&
+                           i == first_ref) {
+                        access = RZ_ANALYSIS_ACC_W;
+                }
+                mc7p_op_add_value(analysis, op, st->operands[i], access,
+                                  effective_type);
+        }
+}
+
+static void mc7p_fill_analysis_access(RzAnalysis *analysis, RzAnalysisOp *op,
+                                      const ut8 *data, int len,
+                                      const char *name) {
+        mc7p_list_t one;
+        int n = mc7p_decode_one_statement(data, (size_t)len, &one);
+        if (n <= 0 || one.count != 1 || !one.stmts || !one.stmts[0]) {
+                return;
+        }
+        mc7p_fill_access_from_params(analysis, op, one.stmts[0]);
+        if (!op->access) {
+                mc7p_fill_access_fallback(analysis, op, one.stmts[0], name);
+        }
+        mc7p_free_list(&one);
+}
+
 static int analysis_op_mc7plus(RzAnalysis *analysis, RzAnalysisOp *op,
                                ut64 addr, const ut8 *data, int len,
                                RzAnalysisOpMask mask) {
@@ -1641,6 +2030,7 @@ static int analysis_op_mc7plus(RzAnalysis *analysis, RzAnalysisOp *op,
         if (read <= 0) {
                 return op->size;
         }
+        op->addr = addr;
         op->size = read;
         op->eob = is_return;
         if (mc7p_flow_one(data, (size_t)len, 0, &flow) < 0) {
@@ -1648,6 +2038,7 @@ static int analysis_op_mc7plus(RzAnalysis *analysis, RzAnalysisOp *op,
         }
         mc7p_base_name(asm_buf, name, sizeof(name));
         op->type = mc7p_op_type(&flow, name);
+        mc7p_fill_analysis_access(analysis, op, data, read, name);
         switch (flow.kind) {
         case MC7P_FLOW_LABEL:
                 mc7p_flag_label(analysis, addr, flow.label_id);

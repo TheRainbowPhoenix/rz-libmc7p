@@ -1702,6 +1702,48 @@ int mc7p_disassemble_one(const uint8_t *code, size_t len, char *buf,
         return best.end;
 }
 
+int mc7p_decode_one_statement(const uint8_t *code, size_t len,
+                              mc7p_list_t *out) {
+        dctx_t d;
+        best_t best;
+        mc7p_stmt_t *st;
+        mc7p_stmt_t **stmts;
+
+        if (!out) {
+                return -1;
+        }
+        memset(out, 0, sizeof(*out));
+        if (len == 0) {
+                return -1;
+        }
+        build_first_index();
+        memset(&d, 0, sizeof(d));
+        if (!decode_best_at(&d, code, len, 0, &best) || best.op < 0) {
+                arena_free_all(&d.arena);
+                return -1;
+        }
+        st = (mc7p_stmt_t *)arena_alloc(&d.arena, sizeof(*st));
+        stmts = (mc7p_stmt_t **)arena_alloc(&d.arena, sizeof(*stmts));
+        if (!st || !stmts) {
+                arena_free_all(&d.arena);
+                return -1;
+        }
+        memset(st, 0, sizeof(*st));
+        st->operation = best.op;
+        st->operands = best.ops;
+        st->operand_count = best.op_count;
+        memcpy(st->flags, best.flags, sizeof(st->flags));
+        st->flag_count = best.flag_count;
+        st->sac = 0;
+        st->bin_len = best.end;
+        stmts[0] = st;
+        out->stmts = stmts;
+        out->count = 1;
+        out->cap = 1;
+        out->_arena = d.arena.head;
+        return best.end;
+}
+
 int mc7p_flow_one(const uint8_t *code, size_t len, size_t off,
                   mc7p_flow_t *out) {
         dctx_t d;

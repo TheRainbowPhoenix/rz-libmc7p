@@ -29,6 +29,39 @@ static int expect_flow(const char *name, const uint8_t *code, size_t code_len,
 	return 0;
 }
 
+static int expect_decode_one_statement(void) {
+	uint8_t code[64];
+	mc7p_list_t one;
+	int n = mc7p_assemble_one("MOVE :Word @SL.Slot16.0 0", code, sizeof(code));
+	if (n <= 0) {
+		printf("FAIL decode_one: assemble error\n");
+		return 1;
+	}
+	if (mc7p_decode_one_statement(code, (size_t)n, &one) != n) {
+		printf("FAIL decode_one: decode length mismatch\n");
+		return 1;
+	}
+	if (one.count != 1 || !one.stmts || !one.stmts[0] ||
+	    one.stmts[0]->operand_count != 3) {
+		printf("FAIL decode_one: malformed statement\n");
+		mc7p_free_list(&one);
+		return 1;
+	}
+	if (one.stmts[0]->operands[0]->kind != MC7P_ACC_TYPE ||
+	    one.stmts[0]->operands[1]->kind != MC7P_ACC_SLOT ||
+	    one.stmts[0]->operands[1]->scope != MC7P_SCOPE_NATIVELOCAL ||
+	    one.stmts[0]->operands[1]->slot_type != MC7P_RANGE_SLOT16 ||
+	    one.stmts[0]->operands[1]->slot_number != 0 ||
+	    one.stmts[0]->operands[2]->kind != MC7P_ACC_IMMEDIATE) {
+		printf("FAIL decode_one: unexpected structured operands\n");
+		mc7p_free_list(&one);
+		return 1;
+	}
+	mc7p_free_list(&one);
+	printf("PASS decode_one structured operands\n");
+	return 0;
+}
+
 int main(void) {
 	int n = (int)(sizeof(mc7p_test_cases) / sizeof(mc7p_test_cases[0]));
 	int i, fails = 0;
@@ -100,6 +133,7 @@ int main(void) {
 		fails += expect_flow("JMP_BBOOL", jmp_bbool, sizeof(jmp_bbool),
 				     MC7P_FLOW_CJMP, 75);
 	}
+	fails += expect_decode_one_statement();
 	if (fails) {
 		printf("%d/%d vectors FAILED\n", fails, n);
 		return 1;

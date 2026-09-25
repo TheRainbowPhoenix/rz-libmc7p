@@ -119,6 +119,12 @@ const char *mc7p_op_name(int operation);
 int mc7p_disassemble_one(const uint8_t *code, size_t len, char *buf,
                          size_t bufsize, int *is_return);
 
+/* Decode exactly one statement at code[0] and expose its structured operands.
+ * The returned statement is stored as out->stmts[0] and remains valid until
+ * mc7p_free_list(out).  Returns the encoded byte length, or -1. */
+int mc7p_decode_one_statement(const uint8_t *code, size_t len,
+                              mc7p_list_t *out);
+
 /* Assemble one rendered MC7+ statement into bytes.
  * Returns the encoded byte length, or -1 when the syntax/opcode form is not
  * supported by the native assembler yet. */

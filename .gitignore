@@ -15,5 +15,6 @@ test_mc7plus_features.exe
 dis_mc7plus_flow.exe
 rizin-dev
 refs
+work_ida_mc7p/
 *.pyc
 *.exe
